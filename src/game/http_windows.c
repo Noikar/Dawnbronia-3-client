@@ -106,8 +106,8 @@ static int http_req_open(const char *url, struct http_req *r, DWORD *status)
 	int secure = (uc.nScheme == INTERNET_SCHEME_HTTPS);
 	free(wurl);
 
-	r->session = WinHttpOpen(HTTP_USER_AGENT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-	                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	r->session = WinHttpOpen(
+	    HTTP_USER_AGENT, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 	if (!r->session) {
 		free(object);
 		return 0;
@@ -121,15 +121,14 @@ static int http_req_open(const char *url, struct http_req *r, DWORD *status)
 	}
 
 	DWORD flags = secure ? (DWORD)WINHTTP_FLAG_SECURE : 0u;
-	r->request = WinHttpOpenRequest(r->connect, L"GET", object, NULL, WINHTTP_NO_REFERER,
-	                                WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+	r->request =
+	    WinHttpOpenRequest(r->connect, L"GET", object, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
 	free(object);
 	if (!r->request) {
 		return 0;
 	}
 
-	if (!WinHttpSendRequest(r->request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-	                        WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+	if (!WinHttpSendRequest(r->request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
 		return 0;
 	}
 	if (!WinHttpReceiveResponse(r->request, NULL)) {
@@ -139,7 +138,7 @@ static int http_req_open(const char *url, struct http_req *r, DWORD *status)
 	DWORD code = 0;
 	DWORD sz = (DWORD)sizeof(code);
 	if (WinHttpQueryHeaders(r->request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-	                        WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX)) {
+	        WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX)) {
 		*status = code;
 	}
 	return 1;
@@ -212,8 +211,7 @@ char *http_get(const char *url, size_t *out_len)
 	return buf;
 }
 
-int http_download(const char *url, const char *dest_path, http_progress_cb progress_cb,
-                  void *userdata)
+int http_download(const char *url, const char *dest_path, http_progress_cb progress_cb, void *userdata)
 {
 	struct http_req r;
 	DWORD status = 0;
@@ -230,7 +228,7 @@ int http_download(const char *url, const char *dest_path, http_progress_cb progr
 	DWORD clen = 0;
 	DWORD csz = (DWORD)sizeof(clen);
 	if (WinHttpQueryHeaders(r.request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-	                        WINHTTP_HEADER_NAME_BY_INDEX, &clen, &csz, WINHTTP_NO_HEADER_INDEX)) {
+	        WINHTTP_HEADER_NAME_BY_INDEX, &clen, &csz, WINHTTP_NO_HEADER_INDEX)) {
 		total = clen;
 	}
 

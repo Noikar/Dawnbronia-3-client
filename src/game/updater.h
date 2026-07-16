@@ -8,13 +8,13 @@
 // polls updater_get_state() each frame and never blocks.
 
 enum updater_state {
-	UPD_IDLE = 0,    // nothing started yet
-	UPD_CHECKING,    // version check in flight
-	UPD_UP_TO_DATE,  // running the latest release
-	UPD_AVAILABLE,   // a newer release exists (see updater_latest_version)
+	UPD_IDLE = 0, // nothing started yet
+	UPD_CHECKING, // version check in flight
+	UPD_UP_TO_DATE, // running the latest release
+	UPD_AVAILABLE, // a newer release exists (see updater_latest_version)
 	UPD_DOWNLOADING, // fetching + verifying changed files
-	UPD_READY,       // staged and verified; call updater_apply_and_exit()
-	UPD_ERROR        // check or download failed (offline, bad data, ...)
+	UPD_READY, // staged and verified; call updater_apply_and_exit()
+	UPD_ERROR // check or download failed (offline, bad data, ...)
 };
 
 // Start the version check on a worker thread. No-op if a check/download is

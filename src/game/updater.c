@@ -19,23 +19,23 @@ extern char *client_version(void);
 
 // Owner/repo whose Releases feed the updater. Lives in one place so a rename is
 // a one-line change.
-#define UPDATE_REPO "Noikar/Dawnbronia-3-client"
+#define UPDATE_REPO    "Noikar/Dawnbronia-3-client"
 #define UPDATE_API_URL "https://api.github.com/repos/" UPDATE_REPO "/releases/latest"
 
 #define UPD_MAXFILES 128
-#define STAGING_DIR "update_staging"
-#define APPLY_BAT "apply_update.bat"
+#define STAGING_DIR  "update_staging"
+#define APPLY_BAT    "apply_update.bat"
 
 struct upd_file {
-	char path[260];  // install-root-relative target, e.g. "bin/moac.exe"
-	char url[600];   // direct download URL for this file's release asset
-	char sha[65];    // expected lowercase hex SHA-256
+	char path[260]; // install-root-relative target, e.g. "bin/moac.exe"
+	char url[600]; // direct download URL for this file's release asset
+	char sha[65]; // expected lowercase hex SHA-256
 	unsigned long long size;
-	int changed;  // set during the diff pass
+	int changed; // set during the diff pass
 };
 
 static volatile LONG g_state = UPD_IDLE;
-static volatile LONG g_progress_milli;  // 0..1000
+static volatile LONG g_progress_milli; // 0..1000
 static char g_latest[64];
 static char g_manifest_url[600];
 static struct upd_file g_files[UPD_MAXFILES];
@@ -194,12 +194,11 @@ static DWORD WINAPI check_worker(LPVOID arg)
 // ---------------------------------------------------------------------------
 
 struct progress_ctx {
-	unsigned long long base;   // bytes fully downloaded before the current file
-	unsigned long long grand;  // total bytes to download across all changed files
+	unsigned long long base; // bytes fully downloaded before the current file
+	unsigned long long grand; // total bytes to download across all changed files
 };
 
-static void download_progress(unsigned long long received, unsigned long long total,
-                              void *userdata)
+static void download_progress(unsigned long long received, unsigned long long total, void *userdata)
 {
 	(void)total;
 	struct progress_ctx *ctx = userdata;
@@ -238,8 +237,7 @@ static int parse_manifest(const char *json)
 		cJSON *sha = cJSON_GetObjectItem(item, "sha256");
 		cJSON *url = cJSON_GetObjectItem(item, "url");
 		cJSON *size = cJSON_GetObjectItem(item, "size");
-		if (!path || !path->valuestring || !sha || !sha->valuestring || !url ||
-		    !url->valuestring) {
+		if (!path || !path->valuestring || !sha || !sha->valuestring || !url || !url->valuestring) {
 			continue;
 		}
 		struct upd_file *f = &g_files[n];
@@ -414,9 +412,8 @@ void updater_apply_and_exit(void)
 	si.cb = sizeof(si);
 
 	char cmd[] = "cmd.exe /c \"" APPLY_BAT "\"";
-	if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
-	                   DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, NULL, NULL,
-	                   &si, &pi)) {
+	if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+	        NULL, NULL, &si, &pi)) {
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 	}

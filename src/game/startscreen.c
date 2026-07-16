@@ -154,8 +154,8 @@ void load_settings(void)
 	fclose(fp);
 }
 
-static void save_settings(const char *un, int remember, const char *pw, uint64_t opts, int win_w, int win_h,
-    const char *account_user)
+static void save_settings(
+    const char *un, int remember, const char *pw, uint64_t opts, int win_w, int win_h, const char *account_user)
 {
 	FILE *fp;
 	char path[1024];
@@ -300,8 +300,8 @@ static int opt_row_y(int i)
 struct disp_rects {
 	int la_x1, la_y1, la_x2, la_y2; // left arrow
 	int ra_x1, ra_y1, ra_x2, ra_y2; // right arrow
-	int val_cx;                     // center x for the value label
-	int y;                          // band top
+	int val_cx; // center x for the value label
+	int y; // band top
 };
 
 static void compute_disp(struct disp_rects *d)
@@ -373,10 +373,10 @@ static int hit(int x, int y, int x1, int y1, int x2, int y2)
 // ---- screen state machine --------------------------------------------------
 
 enum ss_screen {
-	SS_ACCOUNT,  // sign in to an account (the landing screen)
+	SS_ACCOUNT, // sign in to an account (the landing screen)
 	SS_REGISTER, // create a new account
-	SS_SELECT,   // pick / create a character on the signed-in account
-	SS_CREATE    // create a character
+	SS_SELECT, // pick / create a character on the signed-in account
+	SS_CREATE // create a character
 };
 
 struct ss_state {
@@ -396,10 +396,10 @@ struct ss_state {
 
 	// create-character screen
 	char c_name[40];
-	int c_gender;  // 0 = male, 1 = female
-	int c_prof;    // 0 = warrior, 1 = mage, 2 = seyan
-	int c_arch;    // arch variant (admin accounts only)
-	int c_god;     // god powers (admin accounts only)
+	int c_gender; // 0 = male, 1 = female
+	int c_prof; // 0 = warrior, 1 = mage, 2 = seyan
+	int c_arch; // arch variant (admin accounts only)
+	int c_god; // god powers (admin accounts only)
 
 	// character list (select screen)
 	struct acc_char chars[ACC_MAXCHARS];
@@ -459,12 +459,21 @@ static char *active_field(struct ss_state *st, size_t *cap)
 {
 	switch (st->screen) {
 	case SS_REGISTER:
-		if (st->focus == 1) { *cap = sizeof(st->r_pass); return st->r_pass; }
-		if (st->focus == 2) { *cap = sizeof(st->r_pass2); return st->r_pass2; }
+		if (st->focus == 1) {
+			*cap = sizeof(st->r_pass);
+			return st->r_pass;
+		}
+		if (st->focus == 2) {
+			*cap = sizeof(st->r_pass2);
+			return st->r_pass2;
+		}
 		*cap = sizeof(st->r_user);
 		return st->r_user;
 	case SS_ACCOUNT:
-		if (st->focus == 1) { *cap = sizeof(st->a_pass); return st->a_pass; }
+		if (st->focus == 1) {
+			*cap = sizeof(st->a_pass);
+			return st->a_pass;
+		}
 		*cap = sizeof(st->a_user);
 		return st->a_user;
 	case SS_CREATE:
@@ -486,8 +495,8 @@ static void persist(struct ss_state *st)
 {
 	const char *acct = st->remember ? st->a_user : "";
 
-	save_settings(acct, st->remember, st->a_pass, game_options, res_presets[st->res_idx].w,
-	    res_presets[st->res_idx].h, acct);
+	save_settings(
+	    acct, st->remember, st->a_pass, game_options, res_presets[st->res_idx].w, res_presets[st->res_idx].h, acct);
 }
 
 static void do_account_list(struct ss_state *st)
@@ -604,8 +613,8 @@ static int ui_button(int x1, int y1, int x2, int y2, const char *label, int mx, 
 // Draws a horizontal segmented radio of n options, each seg_w wide, starting at
 // (x, y). The selected segment is highlighted. Returns the (possibly updated)
 // selection index for this frame.
-static int ui_radio(int x, int y, int seg_w, int seg_h, const char *const *labels, int n, int sel, int mx, int my,
-    int click)
+static int ui_radio(
+    int x, int y, int seg_w, int seg_h, const char *const *labels, int n, int sel, int mx, int my, int click)
 {
 	int i;
 
@@ -616,8 +625,8 @@ static int ui_radio(int x, int y, int seg_w, int seg_h, const char *const *label
 
 		box(x1, y, x2, y + seg_h, on ? IRGB(16, 26, 10) : (hover ? IRGB(11, 17, 29) : IRGB(6, 10, 20)));
 		box_outline(x1, y, x2, y + seg_h, on ? IRGB(20, 30, 14) : IRGB(17, 21, 32));
-		text_centered((x1 + x2) / 2, y + seg_h / 2 - 5, on ? IRGB(31, 31, 31) : IRGB(23, 23, 25),
-		    RENDER_TEXT_LEFT, labels[i]);
+		text_centered(
+		    (x1 + x2) / 2, y + seg_h / 2 - 5, on ? IRGB(31, 31, 31) : IRGB(23, 23, 25), RENDER_TEXT_LEFT, labels[i]);
 		if (click && hover) {
 			sel = i;
 		}

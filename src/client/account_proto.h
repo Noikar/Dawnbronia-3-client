@@ -38,8 +38,8 @@
 
 // Request layouts (fixed size, little-endian x86 both ends). The password field
 // is obfuscated with the same XOR scheme login uses, keyed by the account name.
-#define ACC_REQ_BASE   (1 + ACC_NAMELEN + ACC_PWLEN)     // REGISTER / LIST
-#define ACC_REQ_CREATE (ACC_REQ_BASE + ACC_NAMELEN + 1)  // CREATE
+#define ACC_REQ_BASE   (1 + ACC_NAMELEN + ACC_PWLEN) // REGISTER / LIST
+#define ACC_REQ_CREATE (ACC_REQ_BASE + ACC_NAMELEN + 1) // CREATE
 
 // Reply frame (raw, uncompressed), read after the connection's SV_REALTIME
 // greeting frame:
