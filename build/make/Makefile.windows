@@ -154,6 +154,14 @@ LTO_FLAGS = -flto=thin
 # Default to using mimalloc unless USE_MIMALLOC=0 is set
 USE_MIMALLOC ?= 1
 
+# Build metadata: stamp the exact commit into the binary (CLIENT_BUILD). Guarded
+# so a checkout without git/tags simply falls back to the compile date. Only
+# cosmetic - the updater compares CLIENT_VERSION (defined in version.c), not this.
+GIT_DESCRIBE := $(shell git describe --tags --always --dirty 2>/dev/null)
+ifneq ($(GIT_DESCRIBE),)
+    VERSION_FLAGS = -DCLIENT_BUILD='"$(GIT_DESCRIBE)"'
+endif
+
 # Project feature flags
 FEATURE_FLAGS = -DSTORE_UNIQUE \
     -DENABLE_CRASH_HANDLER \
@@ -161,6 +169,7 @@ FEATURE_FLAGS = -DSTORE_UNIQUE \
     -DENABLE_DRAGHACK \
     -DUSE_MIMALLOC=$(USE_MIMALLOC) \
     -DSDL_FUNCTION_POINTER_IS_VOID_POINTER \
+    $(VERSION_FLAGS) \
     $(DEVELOPER_FLAGS)
 
 # ============================================================================

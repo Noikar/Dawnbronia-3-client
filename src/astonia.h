@@ -187,6 +187,7 @@ char *load_ascii_file(const char *filename, uint8_t ID);
 unsigned long long get_total_system_memory(void);
 size_t get_memory_usage(void);
 char *client_version(void);
+char *client_build(void);
 
 int rrand(int range);
 
@@ -197,7 +198,6 @@ DLL_EXPORT int butx(int bidx);
 DLL_EXPORT int buty(int bidx);
 
 void render_set_offset(int x, int y);
-char *client_version(void);
 
 // Crash handler (platform-specific, Windows only)
 void register_crash_handler(void);

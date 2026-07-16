@@ -63,7 +63,7 @@ static void cmd_version(void)
 	int i;
 	char *ptr;
 
-	addline("Client version: %s", client_version());
+	addline("Client version: %s (%s)", client_version(), client_build());
 
 	for (i = 0; i < MAXMOD; i++) {
 		ptr = amod_version(i);
