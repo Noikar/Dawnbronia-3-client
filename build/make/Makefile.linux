@@ -66,7 +66,7 @@ OBJS	=		src/gui/gui_core.o src/gui/gui_input.o src/gui/gui_display.o src/gui/gui
 			src/client/client.o src/client/protocol.o src/client/skill.o\
 			src/game/game_core.o src/game/game_effects.o src/game/game_lighting.o src/game/game_display.o\
 			src/game/render.o src/game/font.o src/game/main.o src/game/sprite.o src/game/sprite_config.o\
-			src/game/memory.o\
+			src/game/memory.o src/game/startscreen.o src/game/account.o\
 			src/modder/modder.o\
 			src/sdl/sdl_core.o src/sdl/sdl_texture.o src/sdl/sdl_image.o src/sdl/sdl_effects.o src/sdl/sdl_draw.o src/sdl/sound.o\
 			src/helper/helper.o\
