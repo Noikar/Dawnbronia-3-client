@@ -155,67 +155,6 @@ jobs:
           cmake --install SDL_mixer-build
           rm -rf SDL_mixer-${SDL3_MIXER_VERSION} SDL_mixer-build
 
-  build-sdl3-macos:
-    name: Build SDL3 for macOS
-    runs-on: macos-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Install build dependencies
-        run: brew install cmake ninja
-
-      - name: Get week of year
-        id: week
-        run: echo "week=$(date +%Y-W%U)" >> $GITHUB_OUTPUT
-
-      - name: Cache SDL3 libraries
-        id: cache-sdl3
-        uses: actions/cache@v4
-        with:
-          path: |
-            /opt/homebrew/lib/libSDL3*
-            /opt/homebrew/lib/pkgconfig/sdl3.pc
-            /opt/homebrew/lib/pkgconfig/sdl3-mixer.pc
-            /opt/homebrew/include/SDL3
-            /opt/homebrew/include/SDL3_mixer
-            /opt/homebrew/lib/cmake/SDL3
-            /opt/homebrew/lib/cmake/SDL3_mixer
-            /opt/homebrew/share/licenses/SDL3
-            /opt/homebrew/share/licenses/SDL3_mixer
-          key: sdl3-macos-${{ steps.week.outputs.week }}
-
-      - name: Build SDL3 from source
-        if: steps.cache-sdl3.outputs.cache-hit != 'true'
-        run: |
-          cd /tmp
-          git clone --depth 1 --branch main https://github.com/libsdl-org/SDL.git
-          cmake -S SDL -B SDL-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/opt/homebrew \
-            -DCMAKE_INSTALL_NAME_DIR=/opt/homebrew/lib \
-            -DSDL_STATIC=OFF \
-            -DSDL_RPATH=OFF
-          cmake --build SDL-build
-          sudo cmake --install SDL-build
-          rm -rf SDL SDL-build
-
-      - name: Build SDL3_mixer from source
-        if: steps.cache-sdl3.outputs.cache-hit != 'true'
-        env:
-          SDL3_MIXER_VERSION: prerelease-3.1.2
-        run: |
-          cd /tmp
-          curl -sL https://github.com/libsdl-org/SDL_mixer/archive/refs/tags/${SDL3_MIXER_VERSION}.tar.gz | tar xz
-          cmake -S SDL_mixer-${SDL3_MIXER_VERSION} -B SDL_mixer-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/opt/homebrew \
-            -DCMAKE_INSTALL_NAME_DIR=/opt/homebrew/lib \
-            -DCMAKE_PREFIX_PATH=/opt/homebrew \
-            -DSDL3MIXER_VENDORED=ON
-          cmake --build SDL_mixer-build
-          sudo cmake --install SDL_mixer-build
-          rm -rf SDL_mixer-${SDL3_MIXER_VERSION} SDL_mixer-build
-
   build-linux-release:
     needs: [build-sdl3-linux]
     name: Build Linux Release
@@ -369,6 +308,52 @@ jobs:
       - name: Prepare distribution staging
         run: make distrib-stage
 
+      - name: Build update manifest and per-file assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE=distrib/windows_client
+          OUT=update_assets
+          mkdir -p "$OUT"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          # Each distributed file becomes a flat, uniquely-named release asset
+          # (path separators -> "__"); manifest.json maps the real install path
+          # + SHA-256 + size to that asset's download URL. The client downloads
+          # only the files whose hash changed.
+          {
+            echo '{'
+            echo "  \"version\": \"${GITHUB_REF_NAME}\","
+            echo '  "files": ['
+            first=1
+            while IFS= read -r -d '' f; do
+              rel="${f#"$STAGE"/}"
+              # Never let the updater manage user data or logs: bin/data holds
+              # saved settings and map caches, and *.log/*.dat are runtime state.
+              case "$rel" in
+                bin/data/*|*.log|*.dat) continue ;;
+              esac
+              flat="${rel//\//__}"
+              cp "$f" "$OUT/$flat"
+              sha="$(sha256sum "$f" | cut -d' ' -f1)"
+              size="$(stat -c%s "$f")"
+              if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
+              printf '    {"path": "%s", "sha256": "%s", "size": %s, "url": "%s/%s"}' \
+                "$rel" "$sha" "$size" "$BASE" "$flat"
+            done < <(find "$STAGE" -type f -print0 | sort -z)
+            printf '\n'
+            echo '  ]'
+            echo '}'
+          } > "$OUT/manifest.json"
+          echo "=== manifest.json (head) ==="; head -20 "$OUT/manifest.json"
+          echo "=== asset count: $(ls -1 "$OUT" | wc -l) ==="
+
+      - name: Upload update assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-update-assets
+          path: update_assets/
+          retention-days: 7
+
       - name: Upload distribution staging
         uses: actions/upload-artifact@v4
         with:
@@ -394,172 +379,6 @@ jobs:
             src/amod/amod_structs.h
             src/dll.h
             src/astonia.h
-          retention-days: 7
-          if-no-files-found: error
-
-  build-macos-release:
-    needs: build-sdl3-macos
-    name: Build MacOS Release
-    runs-on: macos-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          lfs: true
-
-      - name: Install dependencies
-        run: |
-          brew install libzip zlib mimalloc imagemagick
-
-      - name: Get week of year
-        id: week
-        run: echo "week=$(date +%Y-W%U)" >> $GITHUB_OUTPUT
-
-      - name: Restore SDL3 libraries from cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            /opt/homebrew/lib/libSDL3*
-            /opt/homebrew/lib/pkgconfig/sdl3.pc
-            /opt/homebrew/lib/pkgconfig/sdl3-mixer.pc
-            /opt/homebrew/include/SDL3
-            /opt/homebrew/include/SDL3_mixer
-            /opt/homebrew/lib/cmake/SDL3
-            /opt/homebrew/lib/cmake/SDL3_mixer
-            /opt/homebrew/share/licenses/SDL3
-            /opt/homebrew/share/licenses/SDL3_mixer
-          key: sdl3-macos-${{ steps.week.outputs.week }}
-          fail-on-cache-miss: true
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: aarch64-apple-darwin
-          cache: true
-          cache-workspaces: astonia_net
-
-      - name: Build release (moac + Rust lib)
-        run: make macos
-
-      - name: Strip debug symbols
-        run: |
-          strip bin/moac
-          strip -x bin/libastonia_net.dylib
-
-      - name: Collect Binaries (macOS)
-        run: |
-          mkdir -p binaries
-          cp bin/moac binaries/
-          cp bin/libastonia_net.dylib binaries/
-          cp -L /opt/homebrew/lib/libSDL3.0.dylib binaries/ 2>/dev/null || true
-          cp -L /opt/homebrew/lib/libSDL3_mixer.0.dylib binaries/ 2>/dev/null || true
-          echo "=== macOS Binaries ==="
-          ls -la binaries/
-
-      - name: Upload Binaries (macOS)
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-binaries
-          path: binaries/
-          retention-days: 7
-
-      # Build unsigned .app bundle
-      - name: Build .app bundle
-        run: make macos-appbundle
-
-      # Materialize the signing certificate from a base64-encoded secret
-      - name: Install signing certificate
-        run: |
-          mkdir -p certs
-          echo "${{ secrets.APPLE_CERT_P12 }}" | base64 --decode > certs/dist.p12
-
-      # Materialize the App Store Connect API key file in ./private_keys
-      # File name must match the api_key (KEY_ID) used later.
-      - name: Install App Store Connect API key
-        run: |
-          mkdir -p private_keys
-          echo '${{ secrets.APP_STORE_CONNECT_KEY }}' > "private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8"
-
-      - name: Install App Store Connect API key JSON
-        run: |
-          echo '${{ secrets.APP_STORE_CONNECT_KEY_JSON }}' > private_keys/appstore_key.json
-
-      - name: Rename app with to tmp name
-        run: |
-          mv distrib/Astonia.app distrib/Astonia-unsigned.app
-
-      # 1) Sign app bundle
-      - name: Sign Astonia.app
-        uses: indygreg/apple-code-sign-action@v1
-        with:
-          input_path: distrib/Astonia-unsigned.app
-          output_path: distrib/Astonia.app
-
-          # Code signing certificate
-          p12_file: certs/dist.p12
-          p12_password: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
-
-          notarize: false
-          staple: false
-
-          rcodesign_version: 0.29.0
-
-          # Extra arguments passed directly to `rcodesign sign`
-          sign_args: |
-            --binary-identifier
-            com.prismaphonic.astonia
-            --for-notarization
-
-      - name: Remove unsigned app bundle
-        run: rm -rf distrib/Astonia-unsigned.app
-
-      # 2) Create an unsigned DMG wrapping the notarized .app
-      - name: Create unsigned DMG from notarized app
-        run: |
-          cd distrib
-          hdiutil create \
-            -volname "Astonia" \
-            -srcfolder "Astonia.app" \
-            -ov \
-            -format UDZO \
-            "Astonia-macOS-unsigned.dmg"
-          cd ..
-          ls -lh distrib/Astonia-macOS-unsigned.dmg
-
-      # 3) Sign + notarize + staple the DMG
-      - name: Sign, notarize, and staple DMG
-        uses: indygreg/apple-code-sign-action@v1
-        with:
-          input_path: distrib/Astonia-macOS-unsigned.dmg
-          output_path: distrib/Astonia-macOS.dmg
-
-          # Code signing certificate
-          p12_file: certs/dist.p12
-          p12_password: ${{ secrets.APPLE_CERT_P12_PASSWORD }}
-
-          rcodesign_version: 0.29.0
-
-          sign_args: |
-            --for-notarization
-
-          # Notarization
-          notarize: true
-          staple: true
-          app_store_connect_api_key_json_file: private_keys/appstore_key.json
-          app_store_connect_api_issuer: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          app_store_connect_api_key: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-
-      - name: Remove unsigned DMG
-        run: rm -f distrib/Astonia-macOS-unsigned.dmg
-
-      - name: Upload signed DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg
-          path: distrib/Astonia-macOS.dmg
           retention-days: 7
           if-no-files-found: error
 
@@ -590,7 +409,6 @@ jobs:
       [
         build-linux-release,
         build-windows-release,
-        build-macos-release,
         build-appimage-release,
       ]
     runs-on: ubuntu-latest
@@ -609,12 +427,6 @@ jobs:
         with:
           name: windows-staging
           path: windows_client
-
-      - name: Download macOS DMG
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-dmg
-          path: .
 
       - name: Download AppImage
         uses: actions/download-artifact@v4
@@ -639,14 +451,11 @@ jobs:
           name: windows-binaries
           path: windows-binaries
 
-      - name: Download macOS Binaries
+      - name: Download Windows update assets
         uses: actions/download-artifact@v4
         with:
-          name: macos-binaries
-          path: macos-binaries
-
-      - name: Rename DMG to match convention
-        run: mv Astonia-macOS.dmg client-macos.dmg
+          name: windows-update-assets
+          path: update_assets
 
       - name: Rename AppImage to match convention
         run: mv astonia-client.AppImage client-linux.AppImage
@@ -658,18 +467,15 @@ jobs:
           zip -q -r mod-sdk.zip mod-sdk
           tar czf client-linux-binaries.tar.gz -C linux-binaries .
           cd windows-binaries && zip -q -r ../client-windows-binaries.zip . && cd ..
-          tar czf client-macos-binaries.tar.gz -C macos-binaries .
 
       - name: Generate checksums
         run: |
           sha256sum client-linux.tar.gz > checksums.txt
           sha256sum client-windows.zip >> checksums.txt
           sha256sum client-linux.AppImage >> checksums.txt
-          sha256sum client-macos.dmg >> checksums.txt
           sha256sum mod-sdk.zip >> checksums.txt
           sha256sum client-linux-binaries.tar.gz >> checksums.txt
           sha256sum client-windows-binaries.zip >> checksums.txt
-          sha256sum client-macos-binaries.tar.gz >> checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -678,12 +484,11 @@ jobs:
             client-linux.tar.gz
             client-windows.zip
             client-linux.AppImage
-            client-macos.dmg
             mod-sdk.zip
             client-linux-binaries.tar.gz
             client-windows-binaries.zip
-            client-macos-binaries.tar.gz
             checksums.txt
+            update_assets/*
           draft: false
           prerelease: false
           generate_release_notes: true
