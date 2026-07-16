@@ -245,7 +245,7 @@ LDFLAGS_CONSOLE ?= $(LINKER_FLAGS) \
                    $(SUBSYSTEM_CONSOLE)
 
 SDL_LIBS=$(shell pkg-config sdl3 --libs)
-LIBS = -lwsock32 -lws2_32 -lpsapi -lz -lpng -lzip -ldwarfstack $(SDL_LIBS) -lSDL3_mixer
+LIBS = -lwsock32 -lws2_32 -lpsapi -lz -lpng -lzip -ldwarfstack $(SDL_LIBS) -lSDL3_mixer -lwinhttp -lbcrypt
 ifeq ($(USE_MIMALLOC),1)
 LIBS += -lmimalloc
 endif
@@ -267,6 +267,7 @@ OBJS	=		src/gui/gui_core.o src/gui/gui_input.o src/gui/gui_display.o src/gui/gui
 			src/modder/sharedmem_windows.o src/game/crash_handler_windows.o\
 			src/game/memory_windows.o src/gui/draghack_windows.o src/client/unique_windows.o\
 			src/game/version.o\
+			src/game/http_windows.o src/game/updater.o\
 			src/lib/cjson/cJSON.o
 
 bin/moac.exe lib/moac.a lib/moac.lib:	verify-sdl3-mixer $(OBJS) $(ASTONIA_NET_LIB)
