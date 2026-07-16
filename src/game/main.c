@@ -45,6 +45,11 @@ void determine_resolution(void);
 int quit = 0;
 int sv_ver = 30;
 
+// Server is hard-coded for this build (our community server). Command-line
+// -d (host), -t (port) and -v (protocol version) still override these.
+#define DEFAULT_SERVER_HOST "127.0.0.1"
+#define DEFAULT_SERVER_PORT 5556
+
 char *localdata;
 
 static int panic_reached = 0;
@@ -628,11 +633,15 @@ int main(int argc, char *argv[])
 #endif
 
 	load_options();
+	load_settings();
 
-	// set some stuff
-	if (!*username || !*password || !*server_url) {
-		display_usage();
-		return 0;
+	// Server is hard-coded for this build; -d / -t / -v still override it.
+	// The character name and password are entered on the start screen below.
+	if (!*server_url) {
+		snprintf(server_url, sizeof(server_url), "%s", DEFAULT_SERVER_HOST);
+	}
+	if (!server_port) {
+		server_port = DEFAULT_SERVER_PORT;
 	}
 
 	xlog(errorfp, "Client started with -h%d -w%d -o%" PRIu64, want_height, want_width, game_options);
@@ -663,6 +672,15 @@ int main(int argc, char *argv[])
 	}
 
 	render_init();
+
+	// Show the pre-game login/settings screen before sound and GUI init, so
+	// display options toggled there take effect for this session. If -u/-p were
+	// supplied on the command line, skip it and connect directly.
+	int play = 1;
+	if (!*username || !*password) {
+		play = start_screen();
+	}
+
 	init_sound();
 
 	if (game_options & GO_LARGE) {
@@ -674,7 +692,9 @@ int main(int argc, char *argv[])
 	help_init();
 	update_user_keys();
 
-	main_loop();
+	if (play) {
+		main_loop();
+	}
 
 #ifdef ENABLE_SHAREDMEM
 	sharedmem_exit();

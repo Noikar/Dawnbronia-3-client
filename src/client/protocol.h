@@ -81,6 +81,7 @@ void cmd_look_char(unsigned int cn);
 void cmd_use(int x, int y);
 void cmd_drop(int x, int y);
 void cmd_speed(int mode);
+void cmd_autopocket(int on);
 void cmd_teleport(int nr);
 void cmd_stop(void);
 void cmd_kill(unsigned int cn);

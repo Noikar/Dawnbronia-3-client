@@ -920,6 +920,10 @@ static void sv_logindone(void)
 {
 	login_done = 1;
 	bzero_client(1);
+
+	// the auto-pocket preference lives client-side (a pre-login setting), so
+	// push our saved state to the server now that we are logged in.
+	cmd_autopocket((game_options & GO_AUTOPOCKET) ? 1 : 0);
 }
 
 static void sv_special(unsigned char *buf)
@@ -1668,6 +1672,15 @@ void cmd_speed(int mode)
 
 	buf[0] = CL_SPEED;
 	buf[1] = (mode < 0) ? 0 : ((mode > 255) ? 255 : (unsigned char)mode);
+	client_send(buf, 2);
+}
+
+void cmd_autopocket(int on)
+{
+	unsigned char buf[16];
+
+	buf[0] = CL_AUTOPOCKET;
+	buf[1] = on ? 1 : 0;
 	client_send(buf, 2);
 }
 

@@ -116,6 +116,7 @@ typedef enum {
 #define CL_PING           39
 #define CL_GETQUESTLOG    40
 #define CL_REOPENQUEST    41
+#define CL_AUTOPOCKET     42
 
 #define PAC_IDLE        0
 #define PAC_MOVE        1

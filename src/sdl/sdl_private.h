@@ -177,6 +177,11 @@ int sdl_pre_do(void);
 extern MIX_Mixer *sdl_mixer;
 extern MIX_Track *sdl_tracks[MAX_SOUND_CHANNELS];
 
+// Audio device lifecycle. Split out of sdl_init so sound can be brought up on
+// demand (e.g. when enabled from the start screen, after sdl_init already ran).
+int sdl_sound_device_start(void);
+void sdl_sound_device_stop(void);
+
 struct png_helper;
 int png_load_helper(struct png_helper *p);
 void png_load_helper_exit(struct png_helper *p);

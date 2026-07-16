@@ -61,3 +61,9 @@ ubsan-report.txt.*
 # Distribution packages
 windows_client.zip
 linux_client.tar.gz
+
+# Local secrets — never commit
+.env
+*.p12
+*.pem
+private_keys/

@@ -317,6 +317,14 @@ int init_sound(void)
 		return -1;
 	}
 
+	// Ensure the audio device exists. When sound is enabled from the start
+	// screen it happens after sdl_init already ran, so the mixer will not have
+	// been created yet; bring it up now. No-op if it is already running, and it
+	// clears GO_SOUND on failure.
+	if (sdl_sound_device_start() != 0) {
+		return -1;
+	}
+
 	// Open sound zip archives (keep open for mod sound loading)
 	// Base sounds - required
 	sx_zip = zip_open("res/sx.zip", ZIP_RDONLY, &err);
@@ -454,6 +462,43 @@ void sound_exit(void)
 
 static void play_sdl_sound(unsigned int nr, int distance, int angle);
 
+// Extra gain applied to environmental ambience so it can be balanced against combat SFX.
+#define AMBIENT_GAIN 0.5f
+
+/*
+ * Environmental ambience sound IDs (see sounds.json): pigeon, crows, laughing man,
+ * water drips, wolf howls, birds, cat, cricket, woodpecker, jay and owls. These play
+ * as background atmosphere and are mixed much louder than combat SFX, so play_sdl_sound
+ * scales just these down without touching the master volume.
+ */
+static int is_ambient_sound(unsigned int nr)
+{
+	switch (nr) {
+	case 10: // pigeon
+	case 11: // crow
+	case 12: // crow2
+	case 13: // laughingman6
+	case 14: // drip1
+	case 15: // drip2
+	case 16: // drip3
+	case 17: // howl1 (wolf)
+	case 18: // howl2 (wolf)
+	case 19: // bird1
+	case 20: // bird2
+	case 21: // bird3
+	case 22: // catmeow2
+	case 23: // cricket
+	case 24: // specht (woodpecker)
+	case 25: // haeher (jay)
+	case 26: // owl1
+	case 27: // owl2
+	case 28: // owl3
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static void play_sdl_sound(unsigned int nr, int distance, int angle)
 {
 	static int sound_channel = 0;
@@ -504,6 +549,12 @@ static void play_sdl_sound(unsigned int nr, int distance, int angle)
 	// 0 = maximum volume (gain 1.0), -128 = silence (gain 0.0)
 	// Convert from negative attenuation to positive gain: gain = 1.0 + (sound_volume / 128.0)
 	float gain = 1.0f + ((float)sound_volume / 128.0f);
+
+	// Halve environmental ambience only; the master volume stays where the user set it.
+	if (is_ambient_sound(nr)) {
+		gain *= AMBIENT_GAIN;
+	}
+
 	MIX_SetTrackGain(track, gain);
 
 	// Assign the audio to the track and play it

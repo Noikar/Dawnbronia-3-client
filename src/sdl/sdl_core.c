@@ -89,6 +89,69 @@ void sdl_dump(FILE *fp)
 
 // #define GO_DEFAULTS (GO_CONTEXT|GO_ACTION|GO_BIGBAR|GO_PREDICT|GO_SHORT|GO_MAPSAVE|GO_NOMAP)
 
+// Bring up the audio device on demand. Safe to call repeatedly: it is a no-op
+// once the mixer exists. On failure it clears GO_SOUND and returns -1 so the
+// caller (and the start-screen Sound checkbox) honestly reflect that audio is
+// unavailable.
+int sdl_sound_device_start(void)
+{
+	if (sdl_mixer) {
+		return 0; // already running
+	}
+
+	// The audio subsystem is only requested at SDL_Init time when GO_SOUND was
+	// already set, so ensure it here. SDL_InitSubSystem is reference-counted and
+	// safe to call when audio is already initialized.
+	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+		warn("SDL_InitSubSystem(AUDIO) failed: %s", SDL_GetError());
+		game_options &= ~GO_SOUND;
+		return -1;
+	}
+
+	if (!MIX_Init()) {
+		warn("MIX_Init failed: %s", SDL_GetError());
+		game_options &= ~GO_SOUND;
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+		return -1;
+	}
+
+	// Create mixer device (NULL spec means use reasonable defaults)
+	sdl_mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, NULL);
+	if (!sdl_mixer) {
+		warn("MIX_CreateMixerDevice failed: %s", SDL_GetError());
+		game_options &= ~GO_SOUND;
+		MIX_Quit();
+		SDL_QuitSubSystem(SDL_INIT_AUDIO);
+		return -1;
+	}
+
+	// Create tracks (SDL3_mixer doesn't auto-allocate channels like SDL2_mixer)
+	for (int i = 0; i < MAX_SOUND_CHANNELS; i++) {
+		sdl_tracks[i] = MIX_CreateTrack(sdl_mixer);
+		if (!sdl_tracks[i]) {
+			warn("MIX_CreateTrack failed for track %d: %s", i, SDL_GetError());
+		}
+	}
+	note("Created %d sound tracks", MAX_SOUND_CHANNELS);
+
+	return 0;
+}
+
+// Tear the audio device back down. Safe to call when sound is not running.
+void sdl_sound_device_stop(void)
+{
+	if (!sdl_mixer) {
+		return;
+	}
+
+	for (int i = 0; i < MAX_SOUND_CHANNELS; i++) {
+		sdl_tracks[i] = NULL;
+	}
+	MIX_Quit(); // destroys the mixer and its tracks
+	sdl_mixer = NULL;
+	SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
 int sdl_init(int width, int height, char *title, int monitor)
 {
 	int i;
@@ -364,27 +427,7 @@ int sdl_init(int width, int height, char *title, int monitor)
 	}
 
 	if (game_options & GO_SOUND) {
-		if (!MIX_Init()) {
-			warn("MIX_Init failed: %s", SDL_GetError());
-			game_options &= ~GO_SOUND;
-		} else {
-			// Create mixer device (NULL spec means use reasonable defaults)
-			sdl_mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, NULL);
-			if (!sdl_mixer) {
-				warn("MIX_CreateMixerDevice failed: %s", SDL_GetError());
-				game_options &= ~GO_SOUND;
-				MIX_Quit();
-			} else {
-				// Create tracks (SDL3_mixer doesn't auto-allocate channels like SDL2_mixer)
-				for (int i = 0; i < MAX_SOUND_CHANNELS; i++) {
-					sdl_tracks[i] = MIX_CreateTrack(sdl_mixer);
-					if (!sdl_tracks[i]) {
-						warn("MIX_CreateTrack failed for track %d: %s", i, SDL_GetError());
-					}
-				}
-				note("Created %d sound tracks", MAX_SOUND_CHANNELS);
-			}
-		}
+		sdl_sound_device_start();
 	}
 
 	// Initialize mutex unconditionally (needed for job queue even in single-threaded mode)
@@ -653,9 +696,7 @@ void sdl_exit(void)
 	// Shutdown the new texture job queue
 	tex_jobs_shutdown();
 
-	if (game_options & GO_SOUND) {
-		MIX_Quit();
-	}
+	sdl_sound_device_stop();
 
 	// Clean up mod textures (gated behind DEVELOPER for address sanitizer)
 	sdl_cleanup_mod_textures();

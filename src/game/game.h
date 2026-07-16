@@ -240,6 +240,14 @@ DLL_EXPORT int _additional_sprite(unsigned int sprite, int attick);
 extern int (*get_player_sprite)(int nr, int zdir, int action, int step, int duration, int attick);
 DLL_EXPORT int _get_player_sprite(int nr, int zdir, int action, int step, int duration, int attick);
 void save_options(void);
+
+// Pre-game login/start screen (src/game/startscreen.c). Returns 1 if the
+// player chose Play (username/password are set), 0 if they quit.
+int start_screen(void);
+
+// Loads persisted start-screen settings (display options, remembered name).
+// Call after load_options() and before sdl_init() so saved options apply.
+void load_settings(void);
 extern unsigned int (*opt_sprite)(unsigned int sprite);
 DLL_EXPORT unsigned int _opt_sprite(unsigned int sprite);
 extern int (*no_lighting_sprite)(unsigned int sprite);
