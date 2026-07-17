@@ -11,6 +11,9 @@
 moac_gcc.*
 sdlt.txt
 
+# Standalone updater build artifacts (source in updater/ is tracked)
+/updater/*.exe
+
 # Zig and build cache directories
 **/.zig-cache/
 **/.cache/
