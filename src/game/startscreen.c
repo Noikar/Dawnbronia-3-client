@@ -54,7 +54,7 @@ extern int server_port;
 // ---- persistence -----------------------------------------------------------
 
 #define SETTINGS_MAGIC   0x41335332u // 'A3S2'
-#define SETTINGS_VERSION 4
+#define SETTINGS_VERSION 5
 
 struct settings_data {
 	uint32_t magic;
@@ -134,8 +134,24 @@ void load_settings(void)
 	if (!fp) {
 		return;
 	}
-	if (fread(&sd, sizeof(sd), 1, fp) == 1 && sd.magic == SETTINGS_MAGIC && sd.version == SETTINGS_VERSION) {
+	// Accept the current settings version and the one just before it, so a new
+	// release can migrate old files in place instead of discarding them (which
+	// would wipe the remembered login and display prefs).
+	if (fread(&sd, sizeof(sd), 1, fp) == 1 && sd.magic == SETTINGS_MAGIC &&
+	    (sd.version == SETTINGS_VERSION || sd.version == SETTINGS_VERSION - 1)) {
+		int migrated = 0;
+
 		sd.username[sizeof(sd.username) - 1] = 0;
+
+		// One-time migration to v5: turn the smooth camera on for players whose
+		// settings predate it, so the new default reaches existing installs too.
+		// Once re-saved at the current version the checkbox choice is respected.
+		if (sd.has_options && sd.version < SETTINGS_VERSION) {
+			sd.game_options |= GO_SMOOTHCAM;
+			migrated = 1;
+		}
+		sd.version = SETTINGS_VERSION;
+
 		g_set = sd;
 		g_set_loaded = 1;
 		if (g_set.has_options && (game_options & GO_NOTSET)) {
@@ -149,6 +165,18 @@ void load_settings(void)
 			want_width = g_set.win_w;
 			want_height = g_set.win_h;
 		}
+		fclose(fp);
+
+		// Persist the upgraded settings so the migration runs only once. Writing
+		// g_set directly keeps the remembered (obfuscated) password intact.
+		if (migrated) {
+			FILE *wf = fopen(path, "wb");
+			if (wf) {
+				fwrite(&g_set, sizeof(g_set), 1, wf);
+				fclose(wf);
+			}
+		}
+		return;
 	}
 	fclose(fp);
 }
@@ -211,6 +239,7 @@ static const struct {
     // means the gear bar is pinned / always visible.
     {"Pin gear bar", GO_SMALLTOP, 1},
     {"Auto-pocket items", GO_AUTOPOCKET, 0},
+    {"Smooth camera", GO_SMOOTHCAM, 0},
 };
 
 #define NUM_OPTS ((int)(sizeof(opt_rows) / sizeof(opt_rows[0])))
@@ -289,9 +318,11 @@ static int opt_col_x(void)
 
 static int opt_row_y(int i)
 {
-	// tightened from -62/20 so the extra option row (plus "Remember login info")
-	// still fits above the display band and the "New account" button below.
-	return YRES / 2 - 72 + i * 18;
+	// Tightened row spacing so every option row plus the "Remember login info"
+	// row stack above the display band (compute_disp, at cy+80) without
+	// overlapping it. With N options the last row is at row index N, so keep
+	// (N+1)*step below ~150 to stay inside the panel.
+	return YRES / 2 - 73 + i * 15;
 }
 
 // The resolution cycler sits in a full-width band below both columns: a "<"
