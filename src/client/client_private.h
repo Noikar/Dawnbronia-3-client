@@ -55,7 +55,7 @@
 #define SV_MIL_EXP          51
 #define SV_QUESTLOG         52
 #define SV_PROTOCOL         53
-#define SV_RESERVED1        54
+#define SV_CHATLOG          54 // complaint chat log transfer (was SV_RESERVED1)
 #define SV_RESERVED2        55
 #define SV_RESERVED3        56
 #define SV_RESERVED4        57

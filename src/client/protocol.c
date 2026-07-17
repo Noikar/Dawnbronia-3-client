@@ -11,6 +11,12 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <SDL3/SDL.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 #include "astonia.h"
 #include "client/client.h"
@@ -426,6 +432,135 @@ static size_t svl_text(unsigned char *buf)
 
 	len = load_u16(buf + 1);
 	return (size_t)len + 3;
+}
+
+// ---- complaint chat log transfer (SV_CHATLOG) -------------------------------
+// The server streams a pre-rendered HTML chat log in chunks after a staff
+// member runs "/complaints log <id>". Wire format:
+// [u8 SV_CHATLOG][u8 subtype][u16 len][payload], subtype 0 = START (u32
+// complaint ID, u32 total size), 1 = DATA, 2 = END. On END the file is saved
+// to the local data directory and opened in the default browser.
+
+#define CHATLOG_MAX (512 * 1024)
+
+extern char *localdata; // set up in main.c, ends with a path separator
+
+static struct {
+	unsigned char *buf;
+	uint32_t total;
+	uint32_t got;
+	uint32_t id;
+} chatlog;
+
+static void chatlog_reset(void)
+{
+	if (chatlog.buf) {
+		free(chatlog.buf);
+	}
+	chatlog.buf = NULL;
+	chatlog.total = chatlog.got = chatlog.id = 0;
+}
+
+static void chatlog_finish(void)
+{
+	char dir[400], path[512], full[512], url[1064];
+	FILE *fp;
+	size_t i, o;
+
+	if (localdata) {
+		snprintf(dir, sizeof(dir), "%schatlogs", localdata);
+	} else {
+		snprintf(dir, sizeof(dir), "bin/data/chatlogs");
+	}
+#ifdef _WIN32
+	(void)_mkdir(dir);
+#else
+	(void)mkdir(dir, 0755);
+#endif
+
+	snprintf(path, sizeof(path), "%s/complaint_%u.html", dir, chatlog.id);
+
+	fp = fopen(path, "wb");
+	if (!fp) {
+		addline("Could not write chat log to %s.", path);
+		return;
+	}
+	fwrite(chatlog.buf, 1, chatlog.total, fp);
+	fclose(fp);
+
+#ifdef _WIN32
+	if (!_fullpath(full, path, sizeof(full))) {
+		snprintf(full, sizeof(full), "%s", path);
+	}
+#else
+	if (!realpath(path, full)) {
+		snprintf(full, sizeof(full), "%s", path);
+	}
+#endif
+
+	// build a file:// URL: forward slashes, percent-encode spaces
+	o = (size_t)snprintf(url, sizeof(url), "file:///");
+	for (i = 0; full[i] && o < sizeof(url) - 4; i++) {
+		if (full[i] == '\\') {
+			url[o++] = '/';
+		} else if (full[i] == ' ') {
+			url[o++] = '%';
+			url[o++] = '2';
+			url[o++] = '0';
+		} else {
+			url[o++] = full[i];
+		}
+	}
+	url[o] = 0;
+
+	if (SDL_OpenURL(url)) {
+		addline("Chat log for complaint #%u saved and opened in your browser.", chatlog.id);
+	} else {
+		addline("Chat log saved to %s (could not open browser).", full);
+	}
+}
+
+static size_t sv_chatlog(unsigned char *buf)
+{
+	uint16_t len;
+
+	len = load_u16(buf + 2);
+
+	switch (buf[1]) {
+	case 0: // START: u32 complaint ID, u32 total size
+		chatlog_reset();
+		if (len == 8) {
+			chatlog.id = load_u32(buf + 4);
+			chatlog.total = load_u32(buf + 8);
+			if (chatlog.total == 0 || chatlog.total > CHATLOG_MAX) {
+				chatlog.total = 0;
+			} else {
+				chatlog.buf = malloc(chatlog.total);
+				if (!chatlog.buf) {
+					chatlog.total = 0;
+				}
+			}
+		}
+		break;
+	case 1: // DATA
+		if (chatlog.buf && chatlog.got + len <= chatlog.total) {
+			memcpy(chatlog.buf + chatlog.got, buf + 4, len);
+			chatlog.got += len;
+		} else {
+			chatlog_reset(); // out of sync, drop the transfer
+		}
+		break;
+	case 2: // END
+		if (chatlog.buf && chatlog.got == chatlog.total) {
+			chatlog_finish();
+		} else {
+			addline("Chat log transfer failed (got %u of %u bytes).", chatlog.got, chatlog.total);
+		}
+		chatlog_reset();
+		break;
+	}
+
+	return (size_t)len + 4;
 }
 
 static size_t sv_conname(unsigned char *buf)
@@ -1266,6 +1401,9 @@ void process(unsigned char *buf, int size)
 				sv_questlog(buf);
 				len = 101 + sizeof(struct shrine_ppd);
 				break;
+			case SV_CHATLOG:
+				len = sv_chatlog(buf);
+				break;
 			case SV_PROTOCOL:
 				len = 2;
 				break;
@@ -1490,6 +1628,9 @@ uint32_t prefetch(unsigned char *buf, int size)
 				break;
 			case SV_QUESTLOG:
 				len = 101 + sizeof(struct shrine_ppd);
+				break;
+			case SV_CHATLOG:
+				len = (size_t)load_u16(buf + 2) + 4;
 				break;
 			case SV_PROTOCOL:
 				sv_protocol(buf);
