@@ -1465,6 +1465,25 @@ static int warcryperccost(void)
 	}
 }
 
+// endurance bar with warcry-cost tick marks; bx is the bar's left edge
+static void display_endurance_bar(int bx, int y, int endup, int xs, int ys)
+{
+	display_bar(bx, y, endup, endurancecolor, xs, ys);
+
+	if (value[0][sv_val(V_WARCRY)]) {
+		int wpc = warcryperccost();
+		for (int i = wpc; i < 100; i += wpc) {
+			int j;
+			j = i * ys / 100;
+			if (i < endup) {
+				render_line(bx, y + ys - j, bx + xs, y + ys - j, 0x0000);
+			} else {
+				render_line(bx, y + ys - j, bx + xs, y + ys - j, 0xffff);
+			}
+		}
+	}
+}
+
 void display_selfbars(void)
 {
 	int lifep, shieldp, endup, manap;
@@ -1498,20 +1517,14 @@ void display_selfbars(void)
 	display_bar(x, y, lifep, healthcolor, xs, ys);
 	display_bar(x + xs + xd, y, shieldp, shieldcolor, xs, ys);
 	if (!value[0][sv_val(V_MANA)]) {
-		display_bar(x + xs * 2 + xd * 2, y, endup, endurancecolor, xs, ys);
-		if (value[0][sv_val(V_WARCRY)]) {
-			int wpc = warcryperccost();
-			for (int i = wpc; i < 100; i += wpc) {
-				int j;
-				j = i * ys / 100;
-				if (i < endup) {
-					render_line(x + xs * 2 + xd * 2, y + ys - j, x + xs * 3 + xd * 2, y + ys - j, 0x0000);
-				} else {
-					render_line(x + xs * 2 + xd * 2, y + ys - j, x + xs * 3 + xd * 2, y + ys - j, 0xffff);
-				}
-			}
-		}
+		display_endurance_bar(x + xs * 2 + xd * 2, y, endup, xs, ys);
 	} else {
 		display_bar(x + xs * 2 + xd * 2, y, manap, manacolor, xs, ys);
+
+		// seyans use both mana and endurance, so show endurance too
+		// (seyan detection: same hack as in skill.c)
+		if (sv_ver == 30 && value[0][V3_ATTACK] && value[0][V3_BLESS]) {
+			display_endurance_bar(x + xs * 3 + xd * 3, y, endup, xs, ys);
+		}
 	}
 }
