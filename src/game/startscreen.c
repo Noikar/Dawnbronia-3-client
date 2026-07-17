@@ -27,7 +27,6 @@
 #include "astonia.h"
 #include "game/game.h"
 #include "game/account.h"
-#include "game/updater.h"
 #include "sdl/sdl.h"
 #include "client/client.h"
 
@@ -877,55 +876,6 @@ static void ui_create(struct ss_state *st, int mx, int my, int click)
 	draw_msg(st, cx, panel_bot + 16);
 }
 
-// A small auto-updater status line pinned to the bottom of every screen. On
-// non-Windows builds the updater is absent, so this compiles to nothing.
-static void draw_update_banner(int mx, int my, int click)
-{
-#ifdef _WIN32
-	int cx = XRES / 2;
-	int by = YRES - 22;
-
-	switch (updater_get_state()) {
-	case UPD_CHECKING:
-		text_centered(cx, by, IRGB(12, 12, 14), RENDER_TEXT_SMALL, "Checking for updates...");
-		break;
-	case UPD_AVAILABLE: {
-		char t[96];
-		snprintf(t, sizeof(t), "Update available: %s", updater_latest_version());
-		text_centered(cx - 55, by, IRGB(28, 24, 10), RENDER_TEXT_SMALL, t);
-		if (ui_button(cx + 74, by - 4, cx + 168, by + 15, "Download", mx, my, click)) {
-			updater_download_async();
-		}
-		break;
-	}
-	case UPD_DOWNLOADING: {
-		char t[64];
-		float p = updater_get_progress();
-		int bx1 = cx - 100, bx2 = cx + 100, byy = by + 11;
-		int w = (int)((float)(bx2 - bx1) * p);
-
-		snprintf(t, sizeof(t), "Downloading update... %d%%", (int)(p * 100.0f + 0.5f));
-		text_centered(cx, by, IRGB(20, 26, 14), RENDER_TEXT_SMALL, t);
-		box_outline(bx1, byy, bx2, byy + 5, IRGB(14, 14, 18));
-		box(bx1, byy, bx1 + w, byy + 5, IRGB(16, 26, 10));
-		break;
-	}
-	case UPD_READY:
-		text_centered(cx - 60, by, IRGB(14, 26, 14), RENDER_TEXT_SMALL, "Update ready.");
-		if (ui_button(cx + 34, by - 4, cx + 172, by + 15, "Restart & apply", mx, my, click)) {
-			updater_apply_and_exit(); // does not return
-		}
-		break;
-	default:
-		break;
-	}
-#else
-	(void)mx;
-	(void)my;
-	(void)click;
-#endif
-}
-
 static void ss_draw(struct ss_state *st, int mx, int my, int click)
 {
 	int cx = XRES / 2, cy = YRES / 2;
@@ -947,8 +897,6 @@ static void ss_draw(struct ss_state *st, int mx, int my, int click)
 		ui_create(st, mx, my, click);
 		break;
 	}
-
-	draw_update_banner(mx, my, click);
 
 	sdl_render();
 }
@@ -1073,12 +1021,6 @@ int start_screen(void)
 	if (*st.a_user) {
 		st.focus = 1; // have an account name, so start on the password
 	}
-
-#ifdef _WIN32
-	// Kick off a background check for a newer client release. The result surfaces
-	// as a banner at the bottom of the screen; it never blocks the UI.
-	updater_check_async();
-#endif
 
 	while (st.running) {
 		int clicked = 0;

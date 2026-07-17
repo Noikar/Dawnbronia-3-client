@@ -155,8 +155,8 @@ LTO_FLAGS = -flto=thin
 USE_MIMALLOC ?= 1
 
 # Build metadata: stamp the exact commit into the binary (CLIENT_BUILD). Guarded
-# so a checkout without git/tags simply falls back to the compile date. Only
-# cosmetic - the updater compares CLIENT_VERSION (defined in version.c), not this.
+# so a checkout without git/tags simply falls back to the compile date. Purely
+# cosmetic - shown as the client build string (see cmd.c "Client version").
 GIT_DESCRIBE := $(shell git describe --tags --always --dirty 2>/dev/null)
 ifneq ($(GIT_DESCRIBE),)
     VERSION_FLAGS = -DCLIENT_BUILD='"$(GIT_DESCRIBE)"'
@@ -245,7 +245,7 @@ LDFLAGS_CONSOLE ?= $(LINKER_FLAGS) \
                    $(SUBSYSTEM_CONSOLE)
 
 SDL_LIBS=$(shell pkg-config sdl3 --libs)
-LIBS = -lwsock32 -lws2_32 -lpsapi -lz -lpng -lzip -ldwarfstack $(SDL_LIBS) -lSDL3_mixer -lwinhttp -lbcrypt
+LIBS = -lwsock32 -lws2_32 -lpsapi -lz -lpng -lzip -ldwarfstack $(SDL_LIBS) -lSDL3_mixer
 ifeq ($(USE_MIMALLOC),1)
 LIBS += -lmimalloc
 endif
@@ -267,7 +267,6 @@ OBJS	=		src/gui/gui_core.o src/gui/gui_input.o src/gui/gui_display.o src/gui/gui
 			src/modder/sharedmem_windows.o src/game/crash_handler_windows.o\
 			src/game/memory_windows.o src/gui/draghack_windows.o src/client/unique_windows.o\
 			src/game/version.o\
-			src/game/http_windows.o src/game/updater.o\
 			src/lib/cjson/cJSON.o
 
 bin/moac.exe lib/moac.a lib/moac.lib:	verify-sdl3-mixer $(OBJS) $(ASTONIA_NET_LIB)
