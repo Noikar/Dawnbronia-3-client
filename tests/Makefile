@@ -50,8 +50,9 @@ endif
 
 ALL_SRCS = $(SDL_SRCS) $(HELPER_SRCS)
 
-# Output directory
-BIN_DIR = ../bin
+# Output directory (test exes live in their own subfolder, not alongside the
+# client binary in bin/). Resources are still read with the repo root as CWD.
+BIN_DIR = ../bin/tests
 
 # Test executables
 TEST_SERIALIZED = $(BIN_DIR)/test_serialized
@@ -92,7 +93,7 @@ test_serialized: $(TEST_SERIALIZED)
 	@echo "==============================================="
 	@echo "Running serialized tests (single-threaded)..."
 	@echo "==============================================="
-	cd .. && ./bin/test_serialized
+	cd .. && ./bin/tests/test_serialized
 
 # Run concurrent tests (multi-threaded worker tests)
 test_concurrent: $(TEST_CONCURRENT)
@@ -100,7 +101,7 @@ test_concurrent: $(TEST_CONCURRENT)
 	@echo "==============================================="
 	@echo "Running concurrent tests (multi-threaded)..."
 	@echo "==============================================="
-	cd .. && ./bin/test_concurrent
+	cd .. && ./bin/tests/test_concurrent
 
 # Run hash distribution diagnostic (separate from main test suite)
 test_hash_diag: $(TEST_HASH_DIAG)
@@ -108,7 +109,7 @@ test_hash_diag: $(TEST_HASH_DIAG)
 	@echo "==============================================="
 	@echo "Running hash distribution diagnostics..."
 	@echo "==============================================="
-	cd .. && ./bin/test_hash_distribution
+	cd .. && ./bin/tests/test_hash_distribution
 
 # Run render primitives tests
 test_render_prims: $(TEST_RENDER_PRIMS)
@@ -116,7 +117,7 @@ test_render_prims: $(TEST_RENDER_PRIMS)
 	@echo "==============================================="
 	@echo "Running render primitives tests..."
 	@echo "==============================================="
-	cd .. && ./bin/test_render_primitives
+	cd .. && ./bin/tests/test_render_primitives
 
 # Run sprite config tests
 test_sprite_config: $(TEST_SPRITE_CONFIG)
@@ -124,7 +125,7 @@ test_sprite_config: $(TEST_SPRITE_CONFIG)
 	@echo "==============================================="
 	@echo "Running sprite config tests..."
 	@echo "==============================================="
-	cd .. && ./bin/test_sprite_config
+	cd .. && ./bin/tests/test_sprite_config
 
 # Run all tests in sequence
 run: test_serialized test_concurrent test_hash_diag test_render_prims test_sprite_config
