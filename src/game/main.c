@@ -47,7 +47,7 @@ int sv_ver = 30;
 
 // Server is hard-coded for this build (our community server). Command-line
 // -d (host), -t (port) and -v (protocol version) still override these.
-#define DEFAULT_SERVER_HOST "127.0.0.1"
+#define DEFAULT_SERVER_HOST "108.64.255.138"
 #define DEFAULT_SERVER_PORT 5556
 
 char *localdata;
