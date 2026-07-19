@@ -347,6 +347,14 @@ void display(void)
 		}
 	}
 
+	// Logout confirmation prompt (armed by F12 or the Exit button). The world keeps
+	// running underneath so the player is never frozen; input is captured in gui_input.c.
+	if (confirm_logout) {
+		render_text_fmt(XRES / 2, doty(DOT_MTL) + 70, IRGB(31, 31, 0),
+		    RENDER_TEXT_LARGE | RENDER_ALIGN_CENTER | RENDER_TEXT_FRAMED | RENDER_TEXT_NOCACHE,
+		    "Return to login?   F12 / Enter = yes     Esc = no");
+	}
+
 display_graphs:;
 
 	int64_t duration = (int64_t)(SDL_GetTicks() - start);

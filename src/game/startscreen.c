@@ -791,7 +791,7 @@ static void ui_account(struct ss_state *st, int mx, int my, int click)
 
 	draw_msg(st, cx, cy + 128);
 	text_centered(cx, cy + 140, IRGB(12, 12, 14), RENDER_TEXT_SMALL,
-	    "Tab: switch field   Enter: sign in   Esc: quit   -   options apply now, resolution on restart");
+	    "Tab: switch field   Enter: sign in   Esc/F12: quit   -   options apply now, resolution on restart");
 }
 
 static void ui_select(struct ss_state *st, int mx, int my, int click)
@@ -1013,6 +1013,12 @@ static void ss_key(struct ss_state *st, SDL_Keycode key)
 		break;
 	case SDLK_ESCAPE:
 		ss_back(st);
+		break;
+	case SDLK_F12:
+		// Full quit from any start-screen page. Pairs with in-game F12 (which
+		// returns here): F12 in-game -> login, F12 again -> close the client.
+		st->running = 0;
+		st->result = 0;
 		break;
 	default:
 		break;

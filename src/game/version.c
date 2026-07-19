@@ -6,7 +6,7 @@
 // updater/ syncs by per-file SHA-256 against the server manifest, so it does not
 // depend on this string.)
 #ifndef CLIENT_VERSION
-#define CLIENT_VERSION "1.3.4"
+#define CLIENT_VERSION "1.4.1"
 #endif
 
 // Build metadata (exact commit), stamped by the Makefile from `git describe`.

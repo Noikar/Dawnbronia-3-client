@@ -865,7 +865,9 @@ void exec_cmd(int cmd, int a)
 		return;
 
 	case CMD_EXIT:
-		quit = 1;
+		// Arm the logout confirmation instead of quitting outright; F12 / Enter
+		// confirms (return to login), Esc cancels. See gui_input.c.
+		confirm_logout = 1;
 		return;
 	case CMD_NOLOOK:
 		show_look = 0;

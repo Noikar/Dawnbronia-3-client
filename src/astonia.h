@@ -141,6 +141,13 @@ extern DLL_EXPORT unsigned int _client_dist;
 
 DLL_EXPORT extern int __yres;
 extern int quit;
+// Set alongside quit when the player leaves via F12 / the Exit button: main()
+// then re-shows the start screen instead of shutting down. A genuine quit
+// (window close, Alt+F4, fatal error) leaves this at 0. See main.c.
+extern int return_to_login;
+// While set, the in-game logout confirmation prompt is showing (F12 / Enter to
+// confirm, Esc to cancel). Armed by F12 or the Exit button. See gui_input.c.
+extern int confirm_logout;
 DLL_EXPORT extern int frames_per_second;
 // 1 until the player passes -k; sdl_init then auto-defaults frames_per_second to
 // the monitor refresh rate so smooth camera has sub-tick frames to interpolate.

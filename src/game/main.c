@@ -43,6 +43,8 @@ void init_logging(void);
 void determine_resolution(void);
 
 int quit = 0;
+int return_to_login = 0;
+int confirm_logout = 0;
 int sv_ver = 30;
 
 // Server is hard-coded for this build (our community server). Command-line
@@ -693,8 +695,31 @@ int main(int argc, char *argv[])
 	help_init();
 	update_user_keys();
 
-	if (play) {
+	// Play-session loop: F12 and the Exit button set return_to_login and drop out
+	// of main_loop() so we come back here and show the start screen again instead
+	// of closing the client. A genuine quit (window close, Alt+F4, fatal error)
+	// leaves return_to_login at 0, so we fall through to shutdown.
+	while (play) {
+		quit = 0;
+		return_to_login = 0;
+		confirm_logout = 0;
+
 		main_loop();
+
+		if (!return_to_login) {
+			break;
+		}
+
+		// Returning to the login screen. main_loop() already called close_client(),
+		// which closed the socket and reset the whole session (bzero_client). Just
+		// drop the current credentials and any leftover kick/area-change state so the
+		// next connection starts clean, then re-show the start screen.
+		username[0] = 0;
+		password[0] = 0;
+		kicked_out = 0;
+		change_area = 0;
+
+		play = start_screen();
 	}
 
 #ifdef ENABLE_SHAREDMEM

@@ -24,6 +24,20 @@ void gui_sdl_keyproc(SDL_Keycode wparam)
 {
 	int i;
 
+	// While the logout confirmation is up, capture every key: F12 / Enter confirms
+	// (return to the login screen), Esc cancels, and anything else is swallowed so
+	// it can't leak through to the game running underneath the prompt.
+	if (confirm_logout) {
+		if (wparam == SDLK_F12 || wparam == SDLK_RETURN || wparam == SDLK_KP_ENTER) {
+			confirm_logout = 0;
+			return_to_login = 1;
+			quit = 1;
+		} else if (wparam == SDLK_ESCAPE) {
+			confirm_logout = 0;
+		}
+		return;
+	}
+
 	if (wparam != SDLK_ESCAPE && wparam != SDLK_F12 && amod_keydown(wparam)) {
 		return;
 	}
@@ -106,7 +120,8 @@ void gui_sdl_keyproc(SDL_Keycode wparam)
 		}
 		return;
 	case SDLK_F12:
-		quit = 1;
+		// Arm the logout confirmation; a second F12 (or Enter) returns to login.
+		confirm_logout = 1;
 		return;
 
 	case SDLK_RETURN:
