@@ -1,0 +1,57 @@
+{
+  "name": "ratquest",
+  "title": "Rats in the Palace",
+  "save_password": "secret",
+  "level": { "min": 5, "max": 12 },
+  "entrance": { "x": 154, "y": 157 },
+
+  "rewards": [
+    { "mark": 1, "percent": 80, "desc": "Slew the Rat King" },
+    { "mark": 2, "percent": 20, "desc": "Fought the rats" }
+  ],
+
+  "doors": [
+    { "door": "Palace, Throneroom", "keyID": 1 }
+  ],
+
+  "npcs": [
+    {
+      "nick": "lydia",
+      "base": "mage",
+      "level": 12,
+      "mode": "n",
+      "respawn": 0,
+      "pos": { "x": 140, "y": 158 },
+      "name": "Lydia",
+      "sprite": 148,
+      "description": "A worried noblewoman.",
+      "greeting": "Rats! Rats everywhere! Please help us, brave one!",
+      "replies": [
+        { "trigger": "rats",   "reply": "The Rat King sleeps below the palace. Slay him and bring me his key!" },
+        { "trigger": "reward", "reply": "Bring me the key and you shall taste my gratitude." }
+      ],
+      "want_item": { "keyID": 1 },
+      "reward_item": { "base": "potion", "keyID": 0, "name": "Lydia's Elixir", "description": "It smells of gratitude." }
+    },
+    {
+      "nick": "ratking",
+      "base": "warrior",
+      "level": 11,
+      "mode": "a",
+      "respawn": 0,
+      "pos": { "x": 161, "y": 158 },
+      "name": "Rat King",
+      "sprite": 560,
+      "gold": 500,
+      "item": { "base": "key", "keyID": 1, "name": "Palace Key", "description": "A gnawed-on key." },
+      "kill_mark": 1
+    },
+
+    { "nick": "rat1", "base": "warrior", "level": 5, "mode": "a", "respawn": 0, "pos": { "x": 144, "y": 157 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 },
+    { "nick": "rat2", "base": "warrior", "level": 5, "mode": "a", "respawn": 0, "pos": { "x": 147, "y": 159 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 },
+    { "nick": "rat3", "base": "warrior", "level": 6, "mode": "a", "respawn": 0, "pos": { "x": 150, "y": 158 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 },
+    { "nick": "rat4", "base": "warrior", "level": 6, "mode": "a", "respawn": 0, "pos": { "x": 153, "y": 160 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 },
+    { "nick": "rat5", "base": "warrior", "level": 7, "mode": "a", "respawn": 0, "pos": { "x": 156, "y": 157 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 },
+    { "nick": "rat6", "base": "warrior", "level": 7, "mode": "a", "respawn": 0, "pos": { "x": 159, "y": 159 }, "name": "Giant Rat", "sprite": 556, "hurt_mark": 2 }
+  ]
+}

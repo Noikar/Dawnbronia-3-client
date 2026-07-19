@@ -60,8 +60,9 @@ TEST_CONCURRENT = $(BIN_DIR)/test_concurrent
 TEST_HASH_DIAG = $(BIN_DIR)/test_hash_distribution
 TEST_RENDER_PRIMS = $(BIN_DIR)/test_render_primitives
 TEST_SPRITE_CONFIG = $(BIN_DIR)/test_sprite_config
+TEST_ZONEIO = $(BIN_DIR)/test_zoneio
 
-all: $(TEST_SERIALIZED) $(TEST_CONCURRENT) $(TEST_HASH_DIAG) $(TEST_RENDER_PRIMS) $(TEST_SPRITE_CONFIG)
+all: $(TEST_SERIALIZED) $(TEST_CONCURRENT) $(TEST_HASH_DIAG) $(TEST_RENDER_PRIMS) $(TEST_SPRITE_CONFIG) $(TEST_ZONEIO)
 test: run
 
 $(TEST_SERIALIZED): test_texture_cache.c $(ALL_SRCS)
@@ -84,6 +85,13 @@ $(TEST_RENDER_PRIMS): test_render_primitives.c $(ALL_SRCS)
 SPRITE_CONFIG_SRCS = ../src/game/sprite_config.c ../src/lib/cjson/cJSON.c
 
 $(TEST_SPRITE_CONFIG): test_sprite_config.c $(SPRITE_CONFIG_SRCS)
+	@mkdir -p $(BIN_DIR)
+	$(CC) -O2 -g -Wall -Wextra -Wpedantic -Wno-unused-parameter -DUNIT_TEST -I../src $^ -o $@
+
+# Zone content parser test (no SDL dependencies, self-contained)
+ZONEIO_SRCS = ../src/zoneio/zoneio.c
+
+$(TEST_ZONEIO): test_zoneio.c $(ZONEIO_SRCS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) -O2 -g -Wall -Wextra -Wpedantic -Wno-unused-parameter -DUNIT_TEST -I../src $^ -o $@
 
@@ -127,14 +135,22 @@ test_sprite_config: $(TEST_SPRITE_CONFIG)
 	@echo "==============================================="
 	cd .. && ./bin/tests/test_sprite_config
 
+# Run zone content parser tests
+test_zoneio: $(TEST_ZONEIO)
+	@echo ""
+	@echo "==============================================="
+	@echo "Running zone content (zoneio) tests..."
+	@echo "==============================================="
+	cd .. && ./bin/tests/test_zoneio
+
 # Run all tests in sequence
-run: test_serialized test_concurrent test_hash_diag test_render_prims test_sprite_config
+run: test_serialized test_concurrent test_hash_diag test_render_prims test_sprite_config test_zoneio
 	@echo ""
 	@echo "==============================================="
 	@echo "All tests passed!"
 	@echo "==============================================="
 
 clean:
-	rm -f $(TEST_SERIALIZED) $(TEST_CONCURRENT) $(TEST_HASH_DIAG) $(TEST_RENDER_PRIMS) $(TEST_SPRITE_CONFIG) *.o
+	rm -f $(TEST_SERIALIZED) $(TEST_CONCURRENT) $(TEST_HASH_DIAG) $(TEST_RENDER_PRIMS) $(TEST_SPRITE_CONFIG) $(TEST_ZONEIO) *.o
 
-.PHONY: all clean run test_serialized test_concurrent test_render_prims test_sprite_config
+.PHONY: all clean run test_serialized test_concurrent test_render_prims test_sprite_config test_zoneio
