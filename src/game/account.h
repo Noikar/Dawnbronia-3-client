@@ -35,4 +35,10 @@ int account_list(const char *host, int port, const char *username, const char *p
 int account_create(
     const char *host, int port, const char *username, const char *password, const char *charname, int flags);
 
+// Permanently delete a character owned by the account. The password is the one
+// the player re-typed to confirm, so a mismatch returns ACC_ST_BADCREDS. The
+// server also refuses with ACC_ST_ONLINE while the character is logged in, or
+// ACC_ST_INCLAN while it belongs to a clan or club (admin accounts bypass both).
+int account_delete(const char *host, int port, const char *username, const char *password, const char *charname);
+
 #endif

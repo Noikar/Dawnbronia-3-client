@@ -406,7 +406,8 @@ enum ss_screen {
 	SS_ACCOUNT, // sign in to an account (the landing screen)
 	SS_REGISTER, // create a new account
 	SS_SELECT, // pick / create a character on the signed-in account
-	SS_CREATE // create a character
+	SS_CREATE, // create a character
+	SS_DELETE // confirm deleting a character (re-enter the account password)
 };
 
 struct ss_state {
@@ -430,6 +431,10 @@ struct ss_state {
 	int c_prof; // 0 = warrior, 1 = mage, 2 = seyan
 	int c_arch; // arch variant (admin accounts only)
 	int c_god; // god powers (admin accounts only)
+
+	// delete-character confirm screen
+	char d_name[40]; // character picked for deletion
+	char d_pass[16]; // account password, re-typed to confirm
 
 	// character list (select screen)
 	struct acc_char chars[ACC_MAXCHARS];
@@ -462,6 +467,10 @@ static const char *acc_error_text(int r)
 		return "Character limit reached for this account.";
 	case ACC_ST_SERVERERR:
 		return "Server error. Please try again.";
+	case ACC_ST_ONLINE:
+		return "That character is still logged in.";
+	case ACC_ST_INCLAN:
+		return "Leave your clan or club before deleting.";
 	case ACC_NET_ERR:
 		return "Could not reach the server.";
 	default:
@@ -478,6 +487,7 @@ static int field_count(enum ss_screen s)
 	case SS_REGISTER:
 		return 3;
 	case SS_CREATE:
+	case SS_DELETE:
 		return 1;
 	default:
 		return 0;
@@ -509,6 +519,9 @@ static char *active_field(struct ss_state *st, size_t *cap)
 	case SS_CREATE:
 		*cap = sizeof(st->c_name);
 		return st->c_name;
+	case SS_DELETE:
+		*cap = sizeof(st->d_pass);
+		return st->d_pass;
 	default:
 		*cap = 0;
 		return NULL;
@@ -615,6 +628,34 @@ static void do_create(struct ss_state *st)
 		setmsg(st, "Character created.", 0);
 	} else {
 		setmsg(st, acc_error_text(r), 1);
+	}
+}
+
+// Delete the character named on the confirm screen. The password sent is the
+// one the player just re-typed, not the stored sign-in password: if it is wrong
+// the server rejects the whole request, so the confirmation cannot be bypassed
+// by a client that skips the prompt.
+static void do_delete(struct ss_state *st)
+{
+	int r;
+
+	if (!*st->d_pass) {
+		setmsg(st, "Enter your account password to confirm.", 1);
+		return;
+	}
+
+	r = account_delete(server_url, server_port, st->a_user, st->d_pass, st->d_name);
+	if (r == ACC_ST_OK) {
+		char done[80];
+
+		snprintf(done, sizeof(done), "%s has been deleted.", st->d_name);
+		memset(st->d_pass, 0, sizeof(st->d_pass));
+		st->d_name[0] = 0;
+		do_account_list(st); // refresh the list and return to the select screen
+		setmsg(st, done, 0);
+	} else {
+		// Wrong password here means the re-typed confirmation, not the sign-in.
+		setmsg(st, (r == ACC_ST_BADCREDS) ? "Wrong account password." : acc_error_text(r), 1);
 	}
 }
 
@@ -800,8 +841,8 @@ static void ui_select(struct ss_state *st, int mx, int my, int click)
 	int rows = (st->char_count > 0) ? st->char_count : 1;
 	int bottom = top + 44 + rows * 26;
 
-	box(cx - 160, top, cx + 160, bottom, IRGB(3, 3, 5));
-	box_outline(cx - 160, top, cx + 160, bottom, IRGB(11, 11, 15));
+	box(cx - 190, top, cx + 190, bottom, IRGB(3, 3, 5));
+	box_outline(cx - 190, top, cx + 190, bottom, IRGB(11, 11, 15));
 
 	{
 		char hdr[96];
@@ -827,18 +868,25 @@ static void ui_select(struct ss_state *st, int mx, int my, int click)
 		}
 		snprintf(cls, sizeof(cls), "%s%s%s", (f & CHR_ARCH) ? "Arch" : "", prof, (f & CHR_GOD) ? ", God" : "");
 		snprintf(label, sizeof(label), "%s  (%s)", st->chars[i].name, cls);
-		render_text(cx - 150, ry + 3, IRGB(28, 28, 30), RENDER_TEXT_LEFT, label);
-		if (ui_button(cx + 80, ry, cx + 150, ry + 20, "Play", mx, my, click)) {
+		render_text(cx - 180, ry + 3, IRGB(28, 28, 30), RENDER_TEXT_LEFT, label);
+		if (ui_button(cx + 40, ry, cx + 110, ry + 20, "Play", mx, my, click)) {
 			play_char(st, st->chars[i].name);
+		}
+		if (ui_button(cx + 118, ry, cx + 180, ry + 20, "Delete", mx, my, click)) {
+			st->screen = SS_DELETE;
+			st->focus = 0;
+			snprintf(st->d_name, sizeof(st->d_name), "%s", st->chars[i].name);
+			memset(st->d_pass, 0, sizeof(st->d_pass));
+			setmsg(st, "", 0);
 		}
 	}
 
-	if (ui_button(cx - 150, bottom + 6, cx - 4, bottom + 26, "Sign out", mx, my, click)) {
+	if (ui_button(cx - 180, bottom + 6, cx - 4, bottom + 26, "Sign out", mx, my, click)) {
 		st->screen = SS_ACCOUNT;
 		st->focus = 0;
 		setmsg(st, "", 0);
 	}
-	if (ui_button(cx + 4, bottom + 6, cx + 150, bottom + 26, "+ New character", mx, my, click)) {
+	if (ui_button(cx + 4, bottom + 6, cx + 180, bottom + 26, "+ New character", mx, my, click)) {
 		st->screen = SS_CREATE;
 		st->focus = 0;
 		st->c_name[0] = 0;
@@ -907,6 +955,40 @@ static void ui_create(struct ss_state *st, int mx, int my, int click)
 	draw_msg(st, cx, panel_bot + 16);
 }
 
+// Confirmation for a destructive, irreversible action, so it deliberately costs
+// more than a click: the player has to re-type the account password, which is
+// also what authorizes the request server-side (see do_delete).
+static void ui_delete(struct ss_state *st, int mx, int my, int click)
+{
+	int cx = XRES / 2, cy = YRES / 2, fx = cx - 90, fw = 180;
+	int panel_top = cy - 90, panel_bot = cy + 76;
+	int y_pass = cy + 14, y_btn = cy + 48;
+	char line[96];
+
+	box(cx - 150, panel_top, cx + 150, panel_bot, IRGB(3, 3, 5));
+	box_outline(cx - 150, panel_top, cx + 150, panel_bot, IRGB(11, 11, 15));
+	text_centered(cx, panel_top + 8, IRGB(31, 12, 10), RENDER_TEXT_LEFT, "Delete Character");
+
+	snprintf(line, sizeof(line), "%s will be gone permanently.", st->d_name);
+	text_centered(cx, panel_top + 34, IRGB(28, 28, 30), RENDER_TEXT_LEFT, line);
+	text_centered(cx, panel_top + 50, IRGB(17, 17, 19), RENDER_TEXT_SMALL,
+	    "All items and experience are lost. This cannot be undone.");
+
+	ui_field(st, 0, fx, y_pass, fw, "Confirm your account password", st->d_pass, 1, mx, my, click);
+
+	if (ui_button(cx - 90, y_btn, cx - 4, y_btn + 20, "Cancel", mx, my, click)) {
+		st->screen = SS_SELECT;
+		st->focus = 0;
+		memset(st->d_pass, 0, sizeof(st->d_pass));
+		setmsg(st, "", 0);
+	}
+	if (ui_button(cx + 4, y_btn, cx + 90, y_btn + 20, "Delete", mx, my, click)) {
+		do_delete(st);
+	}
+
+	draw_msg(st, cx, panel_bot + 16);
+}
+
 static void ss_draw(struct ss_state *st, int mx, int my, int click)
 {
 	int cx = XRES / 2, cy = YRES / 2;
@@ -926,6 +1008,9 @@ static void ss_draw(struct ss_state *st, int mx, int my, int click)
 		break;
 	case SS_CREATE:
 		ui_create(st, mx, my, click);
+		break;
+	case SS_DELETE:
+		ui_delete(st, mx, my, click);
 		break;
 	}
 
@@ -964,6 +1049,9 @@ static void ss_submit(struct ss_state *st)
 	case SS_CREATE:
 		do_create(st);
 		break;
+	case SS_DELETE:
+		do_delete(st);
+		break;
 	default:
 		break;
 	}
@@ -978,6 +1066,10 @@ static void ss_back(struct ss_state *st)
 		st->result = 0;
 		break;
 	case SS_CREATE:
+		st->screen = SS_SELECT;
+		break;
+	case SS_DELETE:
+		memset(st->d_pass, 0, sizeof(st->d_pass));
 		st->screen = SS_SELECT;
 		break;
 	default:
