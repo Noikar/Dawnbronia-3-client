@@ -71,10 +71,10 @@ static int parse_reply(
 		if (buf[off] != ACC_REPLY_MAGIC) {
 			continue;
 		}
-		if (buf[off + 1] < ACC_OP_REGISTER || buf[off + 1] > ACC_OP_CREATE) {
+		if (buf[off + 1] < ACC_OP_REGISTER || buf[off + 1] > ACC_OP_LAST) {
 			continue; // not a valid op echo
 		}
-		if (buf[off + 2] > ACC_ST_SERVERERR) {
+		if (buf[off + 2] > ACC_ST_LAST) {
 			continue; // not a valid status
 		}
 		if (buf[off + 3] > ACC_MAXCHARS) {
@@ -263,6 +263,17 @@ int account_create(
 	build_credentials(req, username, password);
 	put_name(req + 1 + ACC_NAMELEN + ACC_PWLEN, charname);
 	req[1 + ACC_NAMELEN + ACC_PWLEN + ACC_NAMELEN] = (unsigned char)flags;
+
+	return account_transact(host, port, req, (int)sizeof(req), NULL, 0, NULL, NULL);
+}
+
+int account_delete(const char *host, int port, const char *username, const char *password, const char *charname)
+{
+	unsigned char req[ACC_REQ_DELETE];
+
+	req[0] = (unsigned char)ACC_OP_DELETE;
+	build_credentials(req, username, password);
+	put_name(req + 1 + ACC_NAMELEN + ACC_PWLEN, charname);
 
 	return account_transact(host, port, req, (int)sizeof(req), NULL, 0, NULL, NULL);
 }
