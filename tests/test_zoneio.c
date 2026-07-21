@@ -388,6 +388,82 @@ TEST(real_map_write_roundtrip)
 	zio_free(zf2);
 }
 
+/* Count `flag=<name>` lines in .map text. */
+static int count_flag_lines(const char *text, const char *name)
+{
+	int n = 0;
+	size_t nlen = strlen(name);
+	const char *p = text;
+
+	while ((p = strstr(p, "flag=")) != NULL) {
+		if (p != text && p[-1] != '\n' && p[-1] != '\r') { /* not at a line start */
+			p += 5;
+			continue;
+		}
+		const char *v = p + 5;
+		if (!strncmp(v, name, nlen) && (v[nlen] == '\n' || v[nlen] == '\r' || v[nlen] == 0)) {
+			n++;
+		}
+		p += 5;
+	}
+	return n;
+}
+
+/* The parser must not invent flags that the source file never declared.
+ *
+ * Regression test: parsing a `ch=` placement used to raise MF_TMOVEBLOCK on the
+ * cell, mirroring what the server does at runtime. That flag then serialized
+ * back out, so every editor round-trip permanently baked a runtime-only flag
+ * into the map (293 tiles in zone 1). The decode->serialize->decode test above
+ * cannot catch this, because both sides carry the invented flag equally --
+ * the only way to see it is to compare against the ORIGINAL text. */
+TEST(real_map_no_invented_flags)
+{
+	char path[1024], err[256];
+	snprintf(path, sizeof(path), "%s/1/above1.map", g_zones_dir);
+	size_t len = 0;
+	char *text = read_file(path, &len);
+	if (!text) {
+		return; /* not reachable: skip */
+	}
+	/* A rect fill expands one declaration over many cells, which would make the
+	 * per-flag counts legitimately differ. No shipped map uses it; skip if that
+	 * ever changes rather than reporting a false failure. */
+	if (strstr(text, "\nfrom=")) {
+		free(text);
+		return;
+	}
+
+	zio_file *zf = zio_parse(text, len, ZIO_MAP, err, sizeof(err));
+	ASSERT_PTR_NOT_NULL(zf);
+	zio_map m;
+	ASSERT_EQ_INT(0, zio_map_parse(zf, &m, err, sizeof(err)));
+
+	size_t out_len = 0;
+	char *written = zio_map_serialize(&m, &out_len);
+	ASSERT_PTR_NOT_NULL(written);
+
+	int bit;
+	for (bit = 0; bit < 20; bit++) {
+		const char *nm = zio_name_MF(bit);
+		if (!nm) {
+			continue;
+		}
+		int before = count_flag_lines(text, nm);
+		int after = count_flag_lines(written, nm);
+		if (before != after) {
+			fprintf(stderr, "  %s: %d in source, %d after round-trip\n", nm, before, after);
+		}
+		ASSERT_EQ_INT(before, after);
+	}
+	fprintf(stderr, "  (no invented flags across %d MF_ tokens)\n", 20);
+
+	free(text);
+	free(written);
+	zio_map_free(&m);
+	zio_free(zf);
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc > 1) {
@@ -403,6 +479,7 @@ int main(int argc, char *argv[])
 	edit_roundtrip();
 	real_zone_files();
 	real_map_write_roundtrip();
+	real_map_no_invented_flags();
 	fprintf(stderr, "\n=== Test Results ===\n");
 	fprintf(stderr, "Tests run: %d\n", tests_run);
 	fprintf(stderr, "Tests failed: %d\n", tests_failed);

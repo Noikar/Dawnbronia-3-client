@@ -22,14 +22,24 @@
  *   zoneedit [<area>] [--zones=<dir>] [--mapfile=<f>] [--frames=<n>]
  *            [--shot=<file.bmp>] [--set=<x,y,gsprite>]... [--out=<file.map>]
  *            [--highlight=<x,y>] [--warp=<sx,sy,area,dx,dy[,sprite]>]...
+ *            [--link=<sx,sy,destarea,dx,dy[,sprite]>]... [--allow-live]
  *     <area>       numeric zone id (default 1)
  *     --zones      zones root dir (default ../astonia_community_server3/zones)
  *     --mapfile    load this .map directly instead of the zone's
  *     --set        scripted paint of a tile's gsprite (repeatable)
  *     --out        write the (edited) map here
- *     --warp       place a teleport door on (sx,sy) that warps to (dx,dy) in
- *                  `area` (area 0 = same area); generates the driver-10 item
- *                  template in the zone's warps.itm. Pure data, no server code.
+ *     --warp       place a one-way teleport door on (sx,sy) that warps to
+ *                  (dx,dy) in `area` (area 0 = same area); generates the
+ *                  driver-10 item template in the zone's warps.itm.
+ *     --link       connect two maps in BOTH directions: an outbound door at
+ *                  (sx,sy) here and the matching return door at (dx,dy) in
+ *                  destarea. This is how you hang a new test area off an
+ *                  existing one (e.g. a door in Aston to a fresh zone).
+ *     --allow-live edit an existing zone in place instead of read-only; every
+ *                  overwrite takes a timestamped backup first.
+ *
+ * Warps are pure content: the server's teleport_driver already crosses areas,
+ * so linking maps needs no server code change.
  */
 
 #include <stdio.h>
@@ -38,6 +48,7 @@
 #include <stdint.h>
 #include <dirent.h>
 #include <math.h>
+#include <time.h>
 
 #include <SDL3/SDL.h>
 
@@ -287,7 +298,9 @@ static void draw_map_sprite(unsigned int sprite, size_t mn, int scrx, int scry, 
 
 static zio_map g_map;
 static unsigned int *g_place_sprite = NULL; /* per-cell resolved placement sprite */
+static unsigned char *g_char_here = NULL; /* per-cell: an NPC placement sits here */
 static int g_show_flags = 0; /* overlay move-blocked tiles         */
+static int g_live_edit = 0; /* --allow-live: edit zones in place  */
 
 static inline size_t cellof(int x, int y)
 {
@@ -344,8 +357,12 @@ static void draw_zone(double camx, double camy, int w, int h)
 			draw_map_sprite(f >> 16, c, sx, sy, RENDER_ALIGN_OFFSET);
 			draw_map_sprite(g_place_sprite[c], c, sx, sy, RENDER_ALIGN_OFFSET);
 
-			/* Flag overlay: outline move-blocked tiles in red. */
-			if (g_show_flags && (g_map.flags[c] & ((1u << 0) | (1u << 2)))) { /* MF_MOVEBLOCK | MF_TMOVEBLOCK */
+			/* Flag overlay: outline move-blocked tiles in red. A tile an NPC
+			 * stands on is blocked in-game too (the server raises MF_TMOVEBLOCK
+			 * for it at runtime), so show those as well -- derived from the
+			 * placement list rather than from a stored flag, which would bake a
+			 * runtime-only flag into the file on save. */
+			if (g_show_flags && ((g_map.flags[c] & (1u << 0)) || g_char_here[c])) { /* MF_MOVEBLOCK */
 				unsigned short red = 0xF800;
 				render_line(sx - FDX / 2, sy, sx, sy - FDY / 2, red);
 				render_line(sx, sy - FDY / 2, sx + FDX / 2, sy, red);
@@ -389,24 +406,30 @@ static void content_center(double *camx, double *camy)
 	}
 }
 
-/* Append a char/item placement to the decoded map (grows the zio_map's list). */
-static void map_add_placement(int x, int y, int is_char, const char *name)
+/* Append a char/item placement to a decoded map (grows the zio_map's list). */
+static void map_add_placement_to(zio_map *m, int x, int y, int is_char, const char *name)
 {
-	if (g_map.place_count >= g_map.place_cap) {
-		int nc = g_map.place_cap ? g_map.place_cap * 2 : 64;
-		zio_placement *np = realloc(g_map.place, sizeof(zio_placement) * (size_t)nc);
+	if (m->place_count >= m->place_cap) {
+		int nc = m->place_cap ? m->place_cap * 2 : 64;
+		zio_placement *np = realloc(m->place, sizeof(zio_placement) * (size_t)nc);
 		if (!np) {
 			return;
 		}
-		g_map.place = np;
-		g_map.place_cap = nc;
+		m->place = np;
+		m->place_cap = nc;
 	}
-	g_map.place[g_map.place_count].x = x;
-	g_map.place[g_map.place_count].y = y;
-	g_map.place[g_map.place_count].is_char = is_char;
-	strncpy(g_map.place[g_map.place_count].name, name, ZIO_NAMELEN - 1);
-	g_map.place[g_map.place_count].name[ZIO_NAMELEN - 1] = 0;
-	g_map.place_count++;
+	m->place[m->place_count].x = x;
+	m->place[m->place_count].y = y;
+	m->place[m->place_count].is_char = is_char;
+	strncpy(m->place[m->place_count].name, name, ZIO_NAMELEN - 1);
+	m->place[m->place_count].name[ZIO_NAMELEN - 1] = 0;
+	m->place_count++;
+}
+
+/* Same, on the map currently loaded in the editor. */
+static void map_add_placement(int x, int y, int is_char, const char *name)
+{
+	map_add_placement_to(&g_map, x, y, is_char, name);
 }
 
 /* Generate an idiomatic teleport door (driver 10 = IDR_TELEPORT), append it to
@@ -419,7 +442,7 @@ static void map_add_placement(int x, int y, int is_char, const char *name)
  * Note: re-running --warp on a tile appends another record; duplicate it=
  * placements collapse on save (first-per-cell wins), the extra .itm record is
  * harmless but should be pruned by a future dedupe pass. */
-static int add_warp(const char *zonedir, int srcx, int srcy, int area, int dx, int dy, unsigned int sprite)
+static int warp_item_build(zio_item *it, int srcx, int srcy, int area, int dx, int dy, unsigned int sprite)
 {
 	/* Bounds match the server: teleport_driver rejects a destination outside
 	 * 1..MAXMAP-2, and change_area needs area >= 0 (0 = stay in this area). A
@@ -438,48 +461,54 @@ static int add_warp(const char *zonedir, int srcx, int srcy, int area, int dx, i
 		return 1;
 	}
 
-	zio_item it;
-	memset(&it, 0, sizeof(it));
+	memset(it, 0, sizeof(*it));
 
-	snprintf(it.name, sizeof(it.name), "warp_%d_%d", srcx, srcy);
-	snprintf(it.item_name, sizeof(it.item_name), "Teleporter");
-	snprintf(it.description, sizeof(it.description), "A teleporter door.");
-	it.sprite = (int)sprite;
-	it.driver = 10; /* IDR_TELEPORT */
+	snprintf(it->name, sizeof(it->name), "warp_%d_%d", srcx, srcy);
+	snprintf(it->item_name, sizeof(it->item_name), "Teleporter");
+	snprintf(it->description, sizeof(it->description), "A teleporter door.");
+	it->sprite = (int)sprite;
+	it->driver = 10; /* IDR_TELEPORT */
 
 	/* Give the door a light radius so it is visible (mirrors the shipped
 	 * teleporter templates: mod_index=V_LIGHT, mod_value=50). */
 	int vlight = zio_lookup_V("V_LIGHT");
 	if (vlight >= 0) {
-		it.mod_index[0] = vlight;
-		it.mod_value[0] = 50;
-		it.mod_count = 1;
+		it->mod_index[0] = vlight;
+		it->mod_value[0] = 50;
+		it->mod_count = 1;
 	}
 
 	int b;
 	b = zio_lookup_IF("IF_USE");
 	if (b >= 0) {
-		it.flags |= (1ull << b);
+		it->flags |= (1ull << b);
 	}
 	b = zio_lookup_IF("IF_MOVEBLOCK");
 	if (b >= 0) {
-		it.flags |= (1ull << b);
+		it->flags |= (1ull << b);
 	}
 
 	/* arg = dest x (u16 LE), dest y (u16 LE), dest area (u16 LE), quiet=1 */
-	it.arg[0] = (unsigned char)(dx & 0xFF);
-	it.arg[1] = (unsigned char)((dx >> 8) & 0xFF);
-	it.arg[2] = (unsigned char)(dy & 0xFF);
-	it.arg[3] = (unsigned char)((dy >> 8) & 0xFF);
-	it.arg[4] = (unsigned char)(area & 0xFF);
-	it.arg[5] = (unsigned char)((area >> 8) & 0xFF);
-	it.arg[6] = 1;
-	it.arg_len = 7;
-	it.has_arg = 1;
+	it->arg[0] = (unsigned char)(dx & 0xFF);
+	it->arg[1] = (unsigned char)((dx >> 8) & 0xFF);
+	it->arg[2] = (unsigned char)(dy & 0xFF);
+	it->arg[3] = (unsigned char)((dy >> 8) & 0xFF);
+	it->arg[4] = (unsigned char)(area & 0xFF);
+	it->arg[5] = (unsigned char)((area >> 8) & 0xFF);
+	it->arg[6] = 1;
+	it->arg_len = 7;
+	it->has_arg = 1;
+	return 0;
+}
 
+/* Append a generated door template to <zonedir>/warps.itm. The server loads
+ * every .itm in a zone dir, so a separate file keeps generated content out of
+ * the hand-authored ones. Returns 0 on success. */
+static int warp_template_append(const char *zonedir, const zio_item *it)
+{
 	char *buf = NULL;
 	size_t len = 0, cap = 0;
-	if (zio_item_render(&it, &buf, &len, &cap) != 0) {
+	if (zio_item_render(it, &buf, &len, &cap) != 0) {
 		free(buf);
 		fprintf(stderr, "zoneedit: warp render failed\n");
 		return 1;
@@ -498,6 +527,26 @@ static int add_warp(const char *zonedir, int srcx, int srcy, int area, int dx, i
 	fputc('\n', f);
 	fclose(f);
 	free(buf);
+	return 0;
+}
+
+/* Place a teleport door on the loaded map. When may_write is false the door is
+ * still added in memory so it renders as a preview, but nothing is written to
+ * disk -- otherwise a read-only session would leave a stray template behind in
+ * a live zone with no matching placement (a half-applied edit). */
+static int add_warp(
+    const char *zonedir, int srcx, int srcy, int area, int dx, int dy, unsigned int sprite, int may_write)
+{
+	zio_item it;
+	if (warp_item_build(&it, srcx, srcy, area, dx, dy, sprite) != 0) {
+		return 1;
+	}
+
+	if (may_write) {
+		if (warp_template_append(zonedir, &it) != 0) {
+			return 1;
+		}
+	}
 
 	/* Place it on the map and register its sprite so it renders immediately. */
 	map_add_placement(srcx, srcy, 0, it.name);
@@ -506,12 +555,84 @@ static int add_warp(const char *zonedir, int srcx, int srcy, int area, int dx, i
 		g_place_sprite[cellof(srcx, srcy)] = sprite;
 	}
 
-	fprintf(stderr, "zoneedit: warp (%d,%d) -> area %d (%d,%d), template %s written to %s\n", srcx, srcy, area, dx, dy,
-	    it.name, itmp);
+	if (may_write) {
+		fprintf(stderr, "zoneedit: warp (%d,%d) -> area %d (%d,%d), template %s written to %s/warps.itm\n", srcx, srcy,
+		    area, dx, dy, it.name, zonedir);
+	} else {
+		fprintf(stderr, "zoneedit: warp (%d,%d) -> area %d (%d,%d) PREVIEW ONLY (read-only session, nothing written)\n",
+		    srcx, srcy, area, dx, dy);
+	}
 	return 0;
 }
 
 static int file_exists(const char *path); /* defined below */
+static int backup_once(const char *path); /* defined below */
+
+/* Write the return half of a link: a door at (dx,dy) in `destarea` that warps
+ * back to (srcx,srcy) in `srcarea`. The destination zone is not the one loaded
+ * in the editor, so it is edited headlessly through zoneio -- load its .map,
+ * append the door template + placement, write it back (after a backup, since
+ * the destination may well be live content). Returns 0 on success. */
+static int add_return_warp(
+    const char *zones_root, int destarea, int dx, int dy, int srcarea, int srcx, int srcy, unsigned int sprite)
+{
+	char destdir[1024], destmap[1024], err[256];
+	snprintf(destdir, sizeof(destdir), "%s/%d", zones_root, destarea);
+	if (!find_map_file(destdir, destmap, sizeof(destmap))) {
+		fprintf(stderr, "zoneedit: no .map found in %s - cannot write the return door\n", destdir);
+		return 1;
+	}
+
+	zio_item it;
+	if (warp_item_build(&it, dx, dy, srcarea, srcx, srcy, sprite) != 0) {
+		return 1;
+	}
+
+	zio_file *zf = zio_load(destmap, ZIO_MAP, err, sizeof(err));
+	if (!zf) {
+		fprintf(stderr, "zoneedit: cannot load %s: %s\n", destmap, err);
+		return 1;
+	}
+	zio_map dm;
+	memset(&dm, 0, sizeof(dm));
+	if (zio_map_parse(zf, &dm, err, sizeof(err)) != 0) {
+		fprintf(stderr, "zoneedit: cannot parse %s: %s\n", destmap, err);
+		zio_free(zf);
+		return 1;
+	}
+	zio_free(zf);
+
+	/* A door on a tile the map never defines would be dropped by the server's
+	 * loader, so refuse rather than write a link that silently does nothing. */
+	size_t cell = (size_t)dx + (size_t)dy * MAXMAP;
+	if (!dm.gsprite[cell] && !dm.fsprite[cell]) {
+		fprintf(stderr, "zoneedit: area %d tile (%d,%d) is empty - place ground there before linking to it\n", destarea,
+		    dx, dy);
+		zio_map_free(&dm);
+		return 1;
+	}
+
+	if (warp_template_append(destdir, &it) != 0) {
+		zio_map_free(&dm);
+		return 1;
+	}
+	map_add_placement_to(&dm, dx, dy, 0, it.name);
+
+	if (backup_once(destmap) != 0) {
+		zio_map_free(&dm);
+		return 1;
+	}
+	int rc = zio_map_write(&dm, destmap);
+	zio_map_free(&dm);
+	if (rc != 0) {
+		fprintf(stderr, "zoneedit: FAILED to write %s\n", destmap);
+		return 1;
+	}
+
+	fprintf(stderr, "zoneedit: return door area %d (%d,%d) -> area %d (%d,%d), saved %s\n", destarea, dx, dy, srcarea,
+	    srcx, srcy, destmap);
+	return 0;
+}
 
 /* Scaffold a brand-new area: create zones/<N>/, write a small grass-field map,
  * and emit the mandatory `area` table INSERT (the row the server only ever
@@ -618,9 +739,10 @@ static void draw_highlight(int mx, int my, double camx, double camy, int w, int 
 	render_line(sx, sy + FDY / 2, sx - FDX / 2, sy, col);
 }
 
-/* True if a file already exists at path. Used to protect live content: the
- * editor refuses to save over anything that existed when it launched, so an
- * existing zone can never be clobbered — only a fresh --out file is writable. */
+/* True if a file already exists at path. Drives the live-content guard: by
+ * default the editor refuses to save over anything that existed when it
+ * launched, so a live zone can never be clobbered by accident. --allow-live
+ * lifts that, and every in-place overwrite is preceded by a backup. */
 static int file_exists(const char *path)
 {
 	FILE *f = fopen(path, "rb");
@@ -629,6 +751,91 @@ static int file_exists(const char *path)
 		return 1;
 	}
 	return 0;
+}
+
+/* Copy `path` to a timestamped sibling before it is overwritten in place. Live
+ * zones are real game content, so an in-place edit must always leave the
+ * original recoverable. Returns 0 on success (or when there is nothing to back
+ * up, i.e. the file does not exist yet). */
+static int backup_file(const char *path)
+{
+	FILE *in = fopen(path, "rb");
+	if (!in) {
+		return 0; /* nothing to preserve */
+	}
+
+	time_t now = time(NULL);
+	struct tm *lt = localtime(&now);
+	char bak[1200];
+	if (lt) {
+		snprintf(bak, sizeof(bak), "%s.bak-%04d%02d%02d-%02d%02d%02d", path, lt->tm_year + 1900, lt->tm_mon + 1,
+		    lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec);
+	} else {
+		snprintf(bak, sizeof(bak), "%s.bak", path);
+	}
+
+	FILE *out = fopen(bak, "wb");
+	if (!out) {
+		fclose(in);
+		fprintf(stderr, "zoneedit: cannot create backup %s\n", bak);
+		return 1;
+	}
+
+	char buf[65536];
+	size_t n;
+	int rc = 0;
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+		if (fwrite(buf, 1, n, out) != n) {
+			rc = 1;
+			break;
+		}
+	}
+	fclose(in);
+	if (fclose(out) != 0) {
+		rc = 1;
+	}
+	if (rc == 0) {
+		fprintf(stderr, "zoneedit: backed up %s -> %s\n", path, bak);
+	} else {
+		fprintf(stderr, "zoneedit: FAILED to write backup %s\n", bak);
+	}
+	return rc;
+}
+
+/* Back a path up the first time it is written this session. Repeat saves (F5 in
+ * a long editing session) then keep the pristine original rather than burying
+ * it under a pile of near-identical snapshots. Returns 0 when it is safe to
+ * proceed with the write. */
+#define MAX_BACKED_UP 8
+static char g_backed_up[MAX_BACKED_UP][1024];
+static int g_backed_up_count = 0;
+
+static int backup_once(const char *path)
+{
+	int i;
+	for (i = 0; i < g_backed_up_count; i++) {
+		if (!strcmp(g_backed_up[i], path)) {
+			return 0;
+		}
+	}
+	if (backup_file(path) != 0) {
+		fprintf(stderr, "zoneedit: refusing to overwrite %s without a backup\n", path);
+		return 1;
+	}
+	if (g_backed_up_count < MAX_BACKED_UP) {
+		snprintf(g_backed_up[g_backed_up_count], sizeof(g_backed_up[0]), "%s", path);
+		g_backed_up_count++;
+	}
+	return 0;
+}
+
+/* Save the loaded map, taking a one-time backup if the target already exists. */
+static int save_map(const zio_map *m, const char *path)
+{
+	if (backup_once(path) != 0) {
+		return 1;
+	}
+	return zio_map_write(m, path);
 }
 
 /* ------------------------------------------------------- tile palette ------ *
@@ -899,12 +1106,31 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 {
 	char line[256];
 
-	/* top title bar */
+	/* Top title bar. Only the tail of the path is shown: absolute zone paths are
+	 * long enough to run under the status banner on the right. */
 	render_rect_alpha(0, 0, w, 22, IRGB(0, 0, 0), 160);
-	snprintf(line, sizeof line, "zoneedit   %s", save_path ? save_path : "(no file)");
+	const char *shown = save_path ? save_path : "(no file)";
+	if (save_path) {
+		const char *slash = NULL, *p;
+		int seen = 0;
+		for (p = save_path + strlen(save_path); p > save_path; p--) {
+			if (p[-1] == '/' || p[-1] == '\\') {
+				if (++seen == 2) { /* keep "<zone>/<file>.map" */
+					slash = p;
+					break;
+				}
+			}
+		}
+		if (slash) {
+			shown = slash;
+		}
+	}
+	snprintf(line, sizeof line, "zoneedit   %s", shown);
 	render_text(8, 6, IRGB(31, 31, 31), 0, line);
 	if (locked) {
-		render_text(w - 340, 6, IRGB(31, 20, 8), 0, "READ-ONLY (relaunch with --out=NEW.map to save)");
+		render_text(w - 380, 6, IRGB(31, 20, 8), 0, "READ-ONLY (--out=NEW.map, or --allow-live to edit in place)");
+	} else if (g_live_edit) {
+		render_text(w - 300, 6, IRGB(31, 12, 12), 0, "LIVE EDIT - saves overwrite this zone (backed up)");
 	}
 
 	/* bottom status + help bar */
@@ -949,6 +1175,12 @@ int main(int argc, char *argv[])
 	unsigned int warp_sp[64];
 	int nwarp = 0;
 
+	/* Two-way links: same as a warp, plus the matching return door written into
+	 * the destination zone, so one command connects two maps in both directions. */
+	int link_sx[16], link_sy[16], link_a[16], link_dx[16], link_dy[16];
+	unsigned int link_sp[16];
+	int nlink = 0;
+
 	for (i = 1; i < argc; i++) {
 		if (!strncmp(argv[i], "--zones=", 8)) {
 			zones_root = argv[i] + 8;
@@ -990,12 +1222,24 @@ int main(int argc, char *argv[])
 				warp_sp[nwarp] = sp;
 				nwarp++;
 			}
+		} else if (!strncmp(argv[i], "--link=", 7)) {
+			unsigned int sp = 11061;
+			int got = sscanf(argv[i] + 7, "%d,%d,%d,%d,%d,%u", &link_sx[nlink], &link_sy[nlink], &link_a[nlink],
+			    &link_dx[nlink], &link_dy[nlink], &sp);
+			if (nlink < 16 && got >= 5) {
+				link_sp[nlink] = sp;
+				nlink++;
+			} else {
+				fprintf(stderr, "zoneedit: bad --link (want sx,sy,destarea,dx,dy[,sprite])\n");
+			}
 		} else if (!strncmp(argv[i], "--new-area=", 11)) {
 			new_area = atoi(argv[i] + 11);
 		} else if (!strncmp(argv[i], "--area-name=", 12)) {
 			area_name = argv[i] + 12;
 		} else if (!strcmp(argv[i], "--show-flags")) {
 			g_show_flags = 1;
+		} else if (!strcmp(argv[i], "--allow-live")) {
+			g_live_edit = 1;
 		} else if (argv[i][0] != '-') {
 			area = atoi(argv[i]);
 		}
@@ -1035,11 +1279,20 @@ int main(int argc, char *argv[])
 	zio_free(zf);
 
 	g_place_sprite = calloc((size_t)MAXMAP * MAXMAP, sizeof(unsigned int));
+	g_char_here = calloc((size_t)MAXMAP * MAXMAP, sizeof(unsigned char));
+	if (!g_place_sprite || !g_char_here) {
+		fprintf(stderr, "zoneedit: out of memory\n");
+		return 1;
+	}
 	int resolved = 0;
 	for (i = 0; i < g_map.place_count; i++) {
+		size_t pc = cellof(g_map.place[i].x, g_map.place[i].y);
+		if (g_map.place[i].is_char) {
+			g_char_here[pc] = 1;
+		}
 		unsigned int sp = tmpl_lookup(g_map.place[i].name);
 		if (sp) {
-			g_place_sprite[cellof(g_map.place[i].x, g_map.place[i].y)] = sp;
+			g_place_sprite[pc] = sp;
 			resolved++;
 		}
 	}
@@ -1079,28 +1332,55 @@ int main(int argc, char *argv[])
 		    place_x[i], place_y[i], sp ? "" : " (unresolved sprite)");
 	}
 
-	/* Generate + place scripted warp doors (writes the zone's warps.itm). */
-	for (i = 0; i < nwarp; i++) {
-		add_warp(zonedir, warp_sx[i], warp_sy[i], warp_a[i], warp_dx[i], warp_dy[i], warp_sp[i]);
-	}
-
 	/* Where F5 / batch edits save, and whether that target is write-protected.
-	 * Anything that already exists (every live zone) is locked so we can never
-	 * overwrite it; only a brand-new --out path this session is writable. */
+	 * By default anything that already exists (every live zone) is locked, so a
+	 * live map can never be clobbered by accident and only a brand-new --out
+	 * path is writable. --allow-live opts into editing a zone in place, which is
+	 * what linking a door into shipped content (e.g. a door in Aston) requires;
+	 * every such overwrite is preceded by a one-time backup. Computed before the
+	 * warp pass below so a door is never half-applied -- template written to
+	 * disk but placement dropped by a blocked save. */
 	const char *save_path = out_path ? out_path : mapfile;
-	int save_locked = file_exists(save_path);
+	int save_locked = file_exists(save_path) && !g_live_edit;
 	if (save_locked) {
 		fprintf(stderr,
-		    "zoneedit: %s already exists -> READ-ONLY (saving disabled). Pass --out=NEW.map to enable saving.\n",
+		    "zoneedit: %s already exists -> READ-ONLY (saving disabled). Pass --out=NEW.map to write a copy, or "
+		    "--allow-live to edit it in place.\n",
 		    save_path);
+	} else if (g_live_edit && file_exists(save_path)) {
+		fprintf(stderr, "zoneedit: LIVE EDIT enabled - saves overwrite %s (a backup is written first)\n", save_path);
 	}
 
-	/* Save the (edited) map if requested (blocked when the target pre-exists). */
-	if (out_path && !save_locked) {
-		if (zio_map_write(&g_map, out_path) == 0) {
-			fprintf(stderr, "zoneedit: wrote map %s\n", out_path);
+	/* Generate + place scripted warp doors (writes the zone's warps.itm). */
+	for (i = 0; i < nwarp; i++) {
+		add_warp(zonedir, warp_sx[i], warp_sy[i], warp_a[i], warp_dx[i], warp_dy[i], warp_sp[i], !save_locked);
+	}
+
+	/* Two-way links: the outbound door here, plus the return door over in the
+	 * destination zone. Both halves are written, or neither. */
+	for (i = 0; i < nlink; i++) {
+		if (save_locked) {
+			fprintf(stderr, "zoneedit: --link needs a writable map (--allow-live or --out); skipped\n");
+			break;
+		}
+		if (link_a[i] == area) {
+			fprintf(stderr, "zoneedit: --link destination area %d is the loaded area; use --warp instead\n", link_a[i]);
+			continue;
+		}
+		if (add_return_warp(zones_root, link_a[i], link_dx[i], link_dy[i], area, link_sx[i], link_sy[i], link_sp[i]) !=
+		    0) {
+			fprintf(stderr, "zoneedit: link aborted - the outbound door was NOT written\n");
+			continue;
+		}
+		add_warp(zonedir, link_sx[i], link_sy[i], link_a[i], link_dx[i], link_dy[i], link_sp[i], 1);
+	}
+
+	/* Save the (edited) map if requested (blocked when the target is locked). */
+	if ((out_path || nlink) && !save_locked) {
+		if (save_map(&g_map, save_path) == 0) {
+			fprintf(stderr, "zoneedit: wrote map %s\n", save_path);
 		} else {
-			fprintf(stderr, "zoneedit: FAILED to write map %s\n", out_path);
+			fprintf(stderr, "zoneedit: FAILED to write map %s\n", save_path);
 		}
 	}
 
@@ -1126,8 +1406,16 @@ int main(int argc, char *argv[])
 		h = 650;
 	}
 
+	/* Start on the highlighted tile when one was given -- asking to highlight a
+	 * tile means you want to look at it, and on a full-size zone the content
+	 * centroid can be far enough away that the highlight lands off-screen. */
 	double camx, camy;
-	content_center(&camx, &camy);
+	if (hl_x >= 0 && hl_y >= 0) {
+		camx = hl_x;
+		camy = hl_y;
+	} else {
+		content_center(&camx, &camy);
+	}
 	fprintf(stderr, "zoneedit: camera at %.0f,%.0f, view %dx%d\n", camx, camy, w, h);
 
 	palette_build();
@@ -1155,10 +1443,10 @@ int main(int argc, char *argv[])
 				} else if (e.key.key == SDLK_F5) {
 					if (save_locked) {
 						fprintf(stderr,
-						    "zoneedit: save blocked - %s is a pre-existing file. Relaunch with --out=NEW.map to "
-						    "save.\n",
+						    "zoneedit: save blocked - %s is a pre-existing file. Relaunch with --out=NEW.map to save a "
+						    "copy, or --allow-live to edit it in place.\n",
 						    save_path);
-					} else if (zio_map_write(&g_map, save_path) == 0) {
+					} else if (save_map(&g_map, save_path) == 0) {
 						fprintf(stderr, "zoneedit: saved %s\n", save_path);
 					}
 				}

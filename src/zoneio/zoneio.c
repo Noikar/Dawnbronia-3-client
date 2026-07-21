@@ -1227,7 +1227,11 @@ int zio_map_parse(const zio_file *zf, zio_map *out, char *errbuf, size_t errbuf_
 			if (map_add_place(out, x, y, 1, t.value) != 0) {
 				goto oom;
 			}
-			out->flags[CELL(x, y)] |= (1u << 2); /* MF_TMOVEBLOCK */
+			/* Deliberately no MF_TMOVEBLOCK here. The server raises that flag at
+			 * runtime for whatever tile a character currently occupies; it is
+			 * never stored in a .map (no shipped zone file contains it). Setting
+			 * it at parse time would serialize back out and permanently bake a
+			 * runtime-only flag into the source file on every round-trip. */
 		} else if (!strcasecmp(t.name, "it")) {
 			if (map_add_place(out, x, y, 0, t.value) != 0) {
 				goto oom;
