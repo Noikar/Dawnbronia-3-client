@@ -96,15 +96,18 @@ int rrand(int min, int max)
 	return min + (rand() % (max - min + 1));
 }
 
-int sprite_config_do_smoothify(unsigned int sprite __attribute__((unused)))
-{
-	return -1;
-}
+/* NOTE: sprite_config_do_smoothify() / sprite_config_drop_alpha() used to be
+ * stubbed here. The real src/game/sprite_config.c is now linked in (zoneedit
+ * needs it to resolve virtual map sprite ids via trans_asprite), so it provides
+ * those for real — stubbing them again would be a duplicate definition.
+ *
+ * It does still want three client-map globals. In the client these describe the
+ * scrolling local map window; zoneedit indexes its own full 256x256 grid, so the
+ * origin is simply 0,0. They only feed the per-tile desync offset of
+ * position-cycle animations, which stays deterministic either way. */
 
-int sprite_config_drop_alpha(unsigned int sprite __attribute__((unused)))
-{
-	return 0;
-}
+uint16_t originx = 0, originy = 0;
+unsigned int _client_dist = 0;
 
 /* --- text/GUI symbols render.c references -------------------------------- *
  * The base fonts (fonta/fontb/fontc) are now provided by the real src/game/font.c

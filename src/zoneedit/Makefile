@@ -25,7 +25,8 @@ EDIT_SRCS = zoneedit.c zoneedit_stubs.c ../zoneio/zoneio.c
 # Reused client sources (compiled, not modified)
 REUSE_SRCS = ../sdl/sdl_core.c ../sdl/sdl_texture.c ../sdl/sdl_image.c ../sdl/sdl_effects.c \
              ../sdl/sdl_draw.c ../game/render.c ../game/font.c ../game/memory.c \
-             ../game/memory_windows.c ../helper/helper.c
+             ../game/memory_windows.c ../game/sprite_config.c ../lib/cjson/cJSON.c \
+             ../helper/helper.c
 
 SRCS = $(EDIT_SRCS) $(REUSE_SRCS)
 

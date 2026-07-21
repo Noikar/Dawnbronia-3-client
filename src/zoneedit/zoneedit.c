@@ -43,6 +43,38 @@
 
 #include "../zoneio/zoneio.h"
 
+/* The sprite-variant table (res/config/animated_variants.json). Map files store
+ * *virtual* sprite ids that must be resolved to a real archive sprite plus color
+ * and light modifiers before drawing -- see resolve_sprite() below. */
+#include "../game/sprite_config.h"
+
+/* Mirrors src/game/game.h's struct renderfx. Declared locally (rather than
+ * including game.h) to stay consistent with the hand-declared externs below;
+ * keep the field order in sync with game.h if the client's struct ever changes. */
+struct renderfx {
+	unsigned int sprite;
+
+	signed char sink;
+	unsigned char scale;
+	char cr, cg, cb;
+	char clight, sat;
+	unsigned short c1, c2, c3, shine;
+
+	char light;
+	unsigned char freeze;
+
+	char ml, ll, rl, ul, dl;
+
+	char align;
+	short int clipsx, clipex;
+	short int clipsy, clipey;
+
+	unsigned char alpha;
+};
+typedef struct renderfx RenderFX;
+
+extern int render_sprite_fx(RenderFX *fx, int scrx, int scry);
+
 /* Reused client entry points (declared here to avoid pulling the large client
  * headers; signatures match src/sdl/sdl.h and src/game/game.h). */
 extern int sdl_init(int width, int height, char *title, int monitor);
@@ -143,8 +175,12 @@ static void load_templates_dir(const char *dir)
 				zio_item *it = zio_item_at(zf, i);
 				tmpl_add(it->name, (unsigned int)it->sprite);
 			} else {
+				/* A .chr's "sprite" is a character number, not an archive sprite
+				 * id -- the client expands it to 100000 + charno*1000 + frame
+				 * (see _get_player_sprite). Store the idle frame so placements
+				 * resolve to something drawable. */
 				zio_char *ch = zio_char_at(zf, i);
-				tmpl_add(ch->name, (unsigned int)ch->sprite);
+				tmpl_add(ch->name, ch->sprite ? 100000 + (unsigned int)ch->sprite * 1000 : 0);
 			}
 		}
 		zio_free(zf);
@@ -174,6 +210,80 @@ static int find_map_file(const char *zonedir, char *out, size_t outlen)
 }
 
 /* --------------------------------------------------------------- rendering - */
+
+/* Animation clock handed to the sprite-variant system, so animated tiles (water,
+ * fire, ...) cycle in the editor exactly as they do in game. Advanced once per
+ * frame at the client's 24Hz world rate. */
+static tick_t g_anim_tick = 0;
+
+/* Draw one map sprite the way the client does.
+ *
+ * Map files store *virtual* sprite ids: anything listed in animated_variants.json
+ * (e.g. 59072) is not an archive sprite at all, it is a recipe -- "sprite 21306,
+ * tinted red, darkened". The client resolves these through trans_asprite()
+ * before drawing; drawing the raw id instead misses every archive and lands on
+ * the "unknown sprite" placeholder (the red question mark).
+ *
+ * This mirrors _trans_asprite() (src/game/sprite.c), including its >=100000
+ * character-format branch -- terrain never uses that, but NPC placements do.
+ *
+ * mn is the map cell index, used only to desync position-cycle animations
+ * between neighboring tiles.
+ */
+static void draw_map_sprite(unsigned int sprite, size_t mn, int scrx, int scry, char align)
+{
+	unsigned char scale, cr, cg, cb, light, sat;
+	unsigned short c1, c2, c3, shine;
+	RenderFX fx;
+
+	if (!sprite) {
+		return;
+	}
+
+	const AnimatedVariant *v = sprite_config_lookup_animated(sprite);
+	unsigned int real = sprite_config_apply_animated(
+	    v, mn, sprite, g_anim_tick, &scale, &cr, &cg, &cb, &light, &sat, &c1, &c2, &c3, &shine);
+
+	/* Character-format id (100000 + charno*1000 + frame): the character number
+	 * gets its own variant pass, which supplies the colors instead. */
+	if (real >= 100000) {
+		int charno = (int)((real - 100000) / 1000), frame = (int)(real % 1000);
+		int c_scale, c_cr, c_cg, c_cb, c_light, c_sat, c_c1, c_c2, c_c3, c_shine;
+		const CharacterVariant *cv = sprite_config_lookup_character(charno);
+		int base = sprite_config_apply_character(cv, charno, &c_scale, &c_cr, &c_cg, &c_cb, &c_light, &c_sat, &c_c1,
+		    &c_c2, &c_c3, &c_shine, (int)g_anim_tick);
+
+		real = (unsigned int)(100000 + base * 1000 + frame);
+		scale = (unsigned char)c_scale;
+		cr = (unsigned char)c_cr;
+		cg = (unsigned char)c_cg;
+		cb = (unsigned char)c_cb;
+		light = (unsigned char)c_light;
+		sat = (unsigned char)c_sat;
+		c1 = (unsigned short)c_c1;
+		c2 = (unsigned short)c_c2;
+		c3 = (unsigned short)c_c3;
+		shine = (unsigned short)c_shine;
+	}
+
+	memset(&fx, 0, sizeof fx);
+	fx.sprite = real;
+	fx.align = align;
+	fx.light = NORMAL_LIGHT;
+	fx.ml = fx.ll = fx.rl = fx.ul = fx.dl = NORMAL_LIGHT;
+	fx.scale = scale ? scale : 100;
+	fx.cr = (char)cr;
+	fx.cg = (char)cg;
+	fx.cb = (char)cb;
+	fx.clight = (char)light;
+	fx.sat = (char)sat;
+	fx.c1 = c1;
+	fx.c2 = c2;
+	fx.c3 = c3;
+	fx.shine = shine;
+
+	render_sprite_fx(&fx, scrx, scry);
+}
 
 static zio_map g_map;
 static unsigned int *g_place_sprite = NULL; /* per-cell resolved placement sprite */
@@ -228,21 +338,11 @@ static void draw_zone(double camx, double camy, int w, int h)
 			 * (low = primary, high = secondary overlay); the client renders both
 			 * (protocol.c: gsprite/gsprite2). Mirror that here. */
 			unsigned int g = g_map.gsprite[c], f = g_map.fsprite[c];
-			if (g & 0xFFFF) {
-				render_sprite(g & 0xFFFF, sx, sy, NORMAL_LIGHT, RENDER_ALIGN_OFFSET);
-			}
-			if (g >> 16) {
-				render_sprite(g >> 16, sx, sy, NORMAL_LIGHT, RENDER_ALIGN_OFFSET);
-			}
-			if (f & 0xFFFF) {
-				render_sprite(f & 0xFFFF, sx, sy, NORMAL_LIGHT, RENDER_ALIGN_OFFSET);
-			}
-			if (f >> 16) {
-				render_sprite(f >> 16, sx, sy, NORMAL_LIGHT, RENDER_ALIGN_OFFSET);
-			}
-			if (g_place_sprite[c]) {
-				render_sprite(g_place_sprite[c], sx, sy, NORMAL_LIGHT, RENDER_ALIGN_OFFSET);
-			}
+			draw_map_sprite(g & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET);
+			draw_map_sprite(g >> 16, c, sx, sy, RENDER_ALIGN_OFFSET);
+			draw_map_sprite(f & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET);
+			draw_map_sprite(f >> 16, c, sx, sy, RENDER_ALIGN_OFFSET);
+			draw_map_sprite(g_place_sprite[c], c, sx, sy, RENDER_ALIGN_OFFSET);
 
 			/* Flag overlay: outline move-blocked tiles in red. */
 			if (g_show_flags && (g_map.flags[c] & ((1u << 0) | (1u << 2)))) { /* MF_MOVEBLOCK | MF_TMOVEBLOCK */
@@ -532,40 +632,119 @@ static int file_exists(const char *path)
 }
 
 /* ------------------------------------------------------- tile palette ------ *
- * A visual brush picker (RPG-Maker style): the distinct ground sprites already
- * present in the loaded map, shown as clickable thumbnails on a right-side
- * strip. Click a cell to make it the paint brush; the mouse wheel scrolls.
- * This replaces having to know/pass raw sprite numbers on the command line. */
+ * A visual brush picker (RPG-Maker style): the distinct sprites already present
+ * in the loaded map, shown as clickable thumbnails on a right-side strip. Click
+ * a cell to make it the paint brush; the mouse wheel scrolls. This replaces
+ * having to know/pass raw sprite numbers on the command line.
+ *
+ * Maps have two sprite layers and the palette carries both, on switchable tabs:
+ *   FLOORS  = gsprite, the ground (grass, dirt, flagstone)
+ *   OBJECTS = fsprite, everything standing on it (walls, doors, furniture)
+ * A brush remembers which layer it came from, so painting writes back to the
+ * right one with no mode to remember. */
 #define PAL_CELL 44 /* cell edge, logical px          */
 #define PAL_COLS 3 /* thumbnails per row             */
 #define PAL_PAD  5 /* inner padding                  */
 #define PAL_TOP  22 /* below the top title bar        */
 #define PAL_HDR  14 /* header-label height            */
+#define PAL_TABH 16 /* tab-strip height               */
 
-static unsigned int g_pal[8192]; /* distinct gsprite values (the brush set) */
-static int g_pal_count = 0;
-static int g_pal_scroll = 0; /* first visible row */
+#define LAYER_FLOOR  0
+#define LAYER_OBJECT 1
 
-/* Collect the distinct non-empty gsprite values used across the map. */
+typedef struct {
+	unsigned int sprite; /* packed 32-bit value as stored in the map      */
+	unsigned int flags; /* flags this sprite most often carries (objects) */
+} pal_entry;
+
+typedef struct {
+	unsigned int sprite;
+	unsigned int flags;
+	int layer; /* LAYER_FLOOR / LAYER_OBJECT */
+} brush_t;
+
+static pal_entry g_pal[2][8192]; /* [layer][idx] */
+static int g_pal_count[2] = {0, 0};
+static int g_pal_scroll[2] = {0, 0}; /* first visible row, per tab */
+static int g_pal_tab = LAYER_FLOOR;
+
+/* Flag combinations seen for one sprite, so we can pick the most common. */
+#define PAL_MAXCOMBO 8
+
+typedef struct {
+	unsigned int flags;
+	int count;
+} flag_combo;
+
+/* Collect the distinct non-empty sprites of both layers.
+ *
+ * For objects we also learn their flags: the same wall sprite is placed dozens
+ * of times across a zone, nearly always with the same MF_SIGHTBLOCK/MF_MOVEBLOCK
+ * combination. Recording the most common combination lets a painted wall behave
+ * like a wall immediately, while a rug or a low decoration keeps its (empty)
+ * flags -- which a blanket "objects always block" rule would get wrong. */
 static void palette_build(void)
 {
+	static flag_combo combos[8192][PAL_MAXCOMBO];
+	static int combo_count[8192];
 	size_t n = (size_t)MAXMAP * MAXMAP;
-	g_pal_count = 0;
+
+	g_pal_count[LAYER_FLOOR] = g_pal_count[LAYER_OBJECT] = 0;
+	memset(combo_count, 0, sizeof combo_count);
+
 	for (size_t i = 0; i < n; i++) {
-		unsigned int v = g_map.gsprite[i];
-		if (!(v & 0xFFFF)) {
-			continue;
-		}
-		int seen = 0;
-		for (int j = 0; j < g_pal_count; j++) {
-			if (g_pal[j] == v) {
-				seen = 1;
-				break;
+		for (int layer = 0; layer < 2; layer++) {
+			unsigned int v = (layer == LAYER_FLOOR) ? g_map.gsprite[i] : g_map.fsprite[i];
+			if (!(v & 0xFFFF)) {
+				continue;
+			}
+
+			int idx = -1;
+			for (int j = 0; j < g_pal_count[layer]; j++) {
+				if (g_pal[layer][j].sprite == v) {
+					idx = j;
+					break;
+				}
+			}
+			if (idx < 0) {
+				if (g_pal_count[layer] >= (int)(sizeof g_pal[0] / sizeof g_pal[0][0])) {
+					continue;
+				}
+				idx = g_pal_count[layer]++;
+				g_pal[layer][idx].sprite = v;
+				g_pal[layer][idx].flags = 0;
+			}
+
+			if (layer != LAYER_OBJECT) {
+				continue;
+			}
+
+			/* Tally this placement's flag combination for the object brush. */
+			unsigned int fl = g_map.flags[i];
+			int c;
+			for (c = 0; c < combo_count[idx]; c++) {
+				if (combos[idx][c].flags == fl) {
+					combos[idx][c].count++;
+					break;
+				}
+			}
+			if (c == combo_count[idx] && c < PAL_MAXCOMBO) {
+				combos[idx][c].flags = fl;
+				combos[idx][c].count = 1;
+				combo_count[idx]++;
 			}
 		}
-		if (!seen && g_pal_count < (int)(sizeof g_pal / sizeof g_pal[0])) {
-			g_pal[g_pal_count++] = v;
+	}
+
+	/* Settle each object brush on its most frequently seen flag combination. */
+	for (int idx = 0; idx < g_pal_count[LAYER_OBJECT]; idx++) {
+		int best = -1;
+		for (int c = 0; c < combo_count[idx]; c++) {
+			if (best < 0 || combos[idx][c].count > combos[idx][best].count) {
+				best = c;
+			}
 		}
+		g_pal[LAYER_OBJECT][idx].flags = (best >= 0) ? combos[idx][best].flags : 0;
 	}
 }
 
@@ -583,8 +762,20 @@ static int palette_rows_visible(int w, int h)
 {
 	int x0, y0, x1, y1;
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
-	int rows = (y1 - (y0 + PAL_HDR) - PAL_PAD) / PAL_CELL;
+	int rows = (y1 - (y0 + PAL_HDR + PAL_TABH) - PAL_PAD) / PAL_CELL;
 	return rows < 0 ? 0 : rows;
+}
+
+/* Rect of tab `tab` in the tab strip. */
+static void palette_tab_rect(int tab, int w, int h, int *tx0, int *ty0, int *tx1, int *ty1)
+{
+	int x0, y0, x1, y1;
+	palette_rect(w, h, &x0, &y0, &x1, &y1);
+	int half = (x1 - x0) / 2;
+	*tx0 = x0 + tab * half;
+	*ty0 = y0 + PAL_HDR;
+	*tx1 = (tab == 0) ? x0 + half : x1;
+	*ty1 = *ty0 + PAL_TABH;
 }
 
 /* On-screen cell rect for palette entry idx at the current scroll; 0 if hidden. */
@@ -592,26 +783,41 @@ static int palette_cell_rect(int idx, int w, int h, int *cx0, int *cy0)
 {
 	int x0, y0, x1, y1;
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
-	int row = idx / PAL_COLS - g_pal_scroll;
+	int row = idx / PAL_COLS - g_pal_scroll[g_pal_tab];
 	int col = idx % PAL_COLS;
 	if (row < 0 || row >= palette_rows_visible(w, h)) {
 		return 0;
 	}
 	*cx0 = x0 + PAL_PAD + col * PAL_CELL;
-	*cy0 = y0 + PAL_HDR + PAL_PAD + row * PAL_CELL;
+	*cy0 = y0 + PAL_HDR + PAL_TABH + PAL_PAD + row * PAL_CELL;
 	return 1;
 }
 
-/* Window-pixel click -> palette index, or -1 = panel chrome, -2 = outside panel. */
+/* Click routing results that are not a cell index. */
+#define PAL_OUTSIDE (-2) /* not over the panel at all -> let the map have it */
+#define PAL_CHROME  (-1) /* panel background -> swallow the click           */
+#define PAL_TAB0    (-3)
+#define PAL_TAB1    (-4)
+
+/* Window-pixel click -> palette cell index, or one of the PAL_* results above. */
 static int palette_pick(int mouse_x, int mouse_y, int w, int h)
 {
 	double lx = mouse_x - x_offset, ly = mouse_y - y_offset;
 	int x0, y0, x1, y1;
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
 	if (lx < x0 || lx >= x1 || ly < y0 || ly >= y1) {
-		return -2;
+		return PAL_OUTSIDE;
 	}
-	for (int idx = 0; idx < g_pal_count; idx++) {
+
+	for (int tab = 0; tab < 2; tab++) {
+		int tx0, ty0, tx1, ty1;
+		palette_tab_rect(tab, w, h, &tx0, &ty0, &tx1, &ty1);
+		if (lx >= tx0 && lx < tx1 && ly >= ty0 && ly < ty1) {
+			return tab == 0 ? PAL_TAB0 : PAL_TAB1;
+		}
+	}
+
+	for (int idx = 0; idx < g_pal_count[g_pal_tab]; idx++) {
 		int cx0, cy0;
 		if (!palette_cell_rect(idx, w, h, &cx0, &cy0)) {
 			continue;
@@ -620,35 +826,46 @@ static int palette_pick(int mouse_x, int mouse_y, int w, int h)
 			return idx;
 		}
 	}
-	return -1;
+	return PAL_CHROME;
 }
 
 static void palette_scroll(int delta, int w, int h)
 {
-	int total_rows = (g_pal_count + PAL_COLS - 1) / PAL_COLS;
+	int total_rows = (g_pal_count[g_pal_tab] + PAL_COLS - 1) / PAL_COLS;
 	int max_row = total_rows - palette_rows_visible(w, h);
 	if (max_row < 0) {
 		max_row = 0;
 	}
-	g_pal_scroll += delta;
-	if (g_pal_scroll < 0) {
-		g_pal_scroll = 0;
+	g_pal_scroll[g_pal_tab] += delta;
+	if (g_pal_scroll[g_pal_tab] < 0) {
+		g_pal_scroll[g_pal_tab] = 0;
 	}
-	if (g_pal_scroll > max_row) {
-		g_pal_scroll = max_row;
+	if (g_pal_scroll[g_pal_tab] > max_row) {
+		g_pal_scroll[g_pal_tab] = max_row;
 	}
 }
 
-static void draw_palette(int w, int h, unsigned int brush)
+static void draw_palette(int w, int h, brush_t brush)
 {
+	static const char *tab_label[2] = {"FLOORS", "OBJECTS"};
 	int x0, y0, x1, y1;
 	char hdr[64];
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
 	render_rect_alpha(x0, y0, x1, y1, IRGB(2, 2, 5), 245);
-	snprintf(hdr, sizeof hdr, "TILES %d", g_pal_count);
+
+	snprintf(hdr, sizeof hdr, "%s %d", tab_label[g_pal_tab], g_pal_count[g_pal_tab]);
 	render_text(x0 + PAL_PAD, y0 + 3, IRGB(31, 31, 16), 0, hdr);
 
-	for (int idx = 0; idx < g_pal_count; idx++) {
+	/* tab strip: the active tab is lit, the other one dim */
+	for (int tab = 0; tab < 2; tab++) {
+		int tx0, ty0, tx1, ty1;
+		palette_tab_rect(tab, w, h, &tx0, &ty0, &tx1, &ty1);
+		int on = (tab == g_pal_tab);
+		render_rect_alpha(tx0 + 1, ty0, tx1 - 1, ty1 - 2, on ? IRGB(10, 10, 18) : IRGB(4, 4, 8), 255);
+		render_text(tx0 + 6, ty0 + 3, on ? IRGB(31, 31, 20) : IRGB(16, 16, 18), 0, tab_label[tab]);
+	}
+
+	for (int idx = 0; idx < g_pal_count[g_pal_tab]; idx++) {
 		int cx0, cy0;
 		if (!palette_cell_rect(idx, w, h, &cx0, &cy0)) {
 			continue;
@@ -658,17 +875,13 @@ static void draw_palette(int w, int h, unsigned int brush)
 
 		/* thumbnail centered + clipped to the cell (sprites draw at native size) */
 		render_set_clip(cx0, cy0, cx1, cy1);
-		unsigned int g = g_pal[idx];
+		unsigned int g = g_pal[g_pal_tab][idx].sprite;
 		int mx = (cx0 + cx1) / 2, my = (cy0 + cy1) / 2;
-		if (g & 0xFFFF) {
-			render_sprite(g & 0xFFFF, mx, my, NORMAL_LIGHT, RENDER_ALIGN_CENTER);
-		}
-		if (g >> 16) {
-			render_sprite(g >> 16, mx, my, NORMAL_LIGHT, RENDER_ALIGN_CENTER);
-		}
+		draw_map_sprite(g & 0xFFFF, (size_t)idx, mx, my, RENDER_ALIGN_CENTER);
+		draw_map_sprite(g >> 16, (size_t)idx, mx, my, RENDER_ALIGN_CENTER);
 		render_set_clip(0, 0, w, h);
 
-		if (g == brush) { /* selected outline */
+		if (g == brush.sprite && g_pal_tab == brush.layer) { /* selected outline */
 			unsigned short sel = IRGB(31, 31, 0);
 			render_line(cx0, cy0, cx1, cy0, sel);
 			render_line(cx1, cy0, cx1, cy1, sel);
@@ -682,8 +895,7 @@ static void draw_palette(int w, int h, unsigned int brush)
 /* Overlay bars: a title strip up top and a status/help strip along the bottom.
  * This is the first on-screen text (real client fonts via render_create_font),
  * the foundation the tile palette + quest forms will build on. */
-static void draw_hud(
-    int w, int h, int have_hover, int hx, int hy, unsigned int brush, const char *save_path, int locked)
+static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush, const char *save_path, int locked)
 {
 	char line[256];
 
@@ -696,14 +908,16 @@ static void draw_hud(
 	}
 
 	/* bottom status + help bar */
+	const char *layer = (brush.layer == LAYER_OBJECT) ? "object" : "floor";
 	render_rect_alpha(0, h - 22, w, h, IRGB(0, 0, 0), 160);
 	if (have_hover) {
-		snprintf(line, sizeof line, "tile %d,%d   brush %u", hx, hy, brush);
+		snprintf(line, sizeof line, "tile %d,%d   brush %u (%s)", hx, hy, brush.sprite, layer);
 	} else {
-		snprintf(line, sizeof line, "brush %u   (hover a tile)", brush);
+		snprintf(line, sizeof line, "brush %u (%s)   (hover a tile)", brush.sprite, layer);
 	}
 	render_text(8, h - 16, IRGB(24, 31, 24), 0, line);
-	render_text(w - 380, h - 16, IRGB(24, 24, 31), 0, "LMB paint  RMB erase  MMB pick  F5 save  WASD pan  ESC quit");
+	render_text(
+	    w - 420, h - 16, IRGB(24, 24, 31), 0, "LMB paint  RMB erase  MMB pick  TAB layer  F5 save  WASD pan  ESC quit");
 }
 
 int main(int argc, char *argv[])
@@ -899,6 +1113,10 @@ int main(int argc, char *argv[])
 	render_clear_clip();
 	render_create_font(); /* real client fonts (font.c) for the HUD/panels */
 
+	/* Loads the res/config JSON tables, including the animated-variant table that
+	 * maps virtual map sprite ids onto real archive sprites (see draw_map_sprite). */
+	sprite_config_init();
+
 	/* Use the client's logical draw area (what render_clear_clip just set) for
 	 * projection centering, not the physical window size. */
 	int csx, csy, w, h;
@@ -912,8 +1130,12 @@ int main(int argc, char *argv[])
 	content_center(&camx, &camy);
 	fprintf(stderr, "zoneedit: camera at %.0f,%.0f, view %dx%d\n", camx, camy, w, h);
 
-	unsigned int brush = g_map.gsprite[cellof((int)camx, (int)camy)]; /* eyedropper default */
 	palette_build();
+	fprintf(stderr, "zoneedit: palette has %d floor and %d object brushes\n", g_pal_count[LAYER_FLOOR],
+	    g_pal_count[LAYER_OBJECT]);
+
+	/* Start on whatever the camera is sitting on. */
+	brush_t brush = {g_map.gsprite[cellof((int)camx, (int)camy)], 0, LAYER_FLOOR};
 	int running = 1, frame = 0;
 	const double pan = 1.0; /* tiles per frame while a pan key is held */
 	while (running) {
@@ -928,6 +1150,8 @@ int main(int argc, char *argv[])
 			} else if (e.type == SDL_EVENT_KEY_DOWN) {
 				if (e.key.key == SDLK_ESCAPE) {
 					running = 0;
+				} else if (e.key.key == SDLK_TAB) {
+					g_pal_tab = (g_pal_tab == LAYER_FLOOR) ? LAYER_OBJECT : LAYER_FLOOR;
 				} else if (e.key.key == SDLK_F5) {
 					if (save_locked) {
 						fprintf(stderr,
@@ -942,19 +1166,49 @@ int main(int argc, char *argv[])
 				palette_scroll(-(int)e.wheel.y, w, h);
 			} else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
 				int pk = palette_pick((int)e.button.x, (int)e.button.y, w, h);
-				if (pk >= 0) {
+				if (pk == PAL_TAB0 || pk == PAL_TAB1) {
 					if (e.button.button == SDL_BUTTON_LEFT) {
-						brush = g_pal[pk]; /* pick brush from palette */
+						g_pal_tab = (pk == PAL_TAB0) ? LAYER_FLOOR : LAYER_OBJECT;
 					}
-				} else if (pk == -2 && have_hover) { /* over the map, not the panel */
+				} else if (pk >= 0) {
+					if (e.button.button == SDL_BUTTON_LEFT) { /* pick brush from palette */
+						brush.sprite = g_pal[g_pal_tab][pk].sprite;
+						brush.flags = g_pal[g_pal_tab][pk].flags;
+						brush.layer = g_pal_tab;
+					}
+				} else if (pk == PAL_OUTSIDE && have_hover) { /* over the map, not the panel */
 					size_t c = cellof(hx, hy);
 					if (e.button.button == SDL_BUTTON_LEFT) {
-						g_map.gsprite[c] = brush; /* paint */
+						if (brush.layer == LAYER_OBJECT) {
+							/* Objects bring their usual flags along, so a painted
+							 * wall blocks sight/movement the way that same wall
+							 * does everywhere else in the zone. */
+							g_map.fsprite[c] = brush.sprite;
+							g_map.flags[c] = brush.flags;
+						} else {
+							g_map.gsprite[c] = brush.sprite;
+						}
 					} else if (e.button.button == SDL_BUTTON_RIGHT) {
-						g_map.gsprite[c] = g_map.fsprite[c] = g_map.flags[c] = 0; /* erase */
-						g_place_sprite[c] = 0;
-					} else if (e.button.button == SDL_BUTTON_MIDDLE) {
-						brush = g_map.gsprite[c]; /* eyedropper */
+						/* Erase the brush's own layer; clearing the object layer
+						 * drops the flags it brought with it. */
+						if (brush.layer == LAYER_OBJECT) {
+							g_map.fsprite[c] = 0;
+							g_map.flags[c] = 0;
+							g_place_sprite[c] = 0;
+						} else {
+							g_map.gsprite[c] = 0;
+						}
+					} else if (e.button.button == SDL_BUTTON_MIDDLE) { /* eyedropper */
+						if (g_map.fsprite[c] & 0xFFFF) {
+							brush.sprite = g_map.fsprite[c];
+							brush.flags = g_map.flags[c];
+							brush.layer = LAYER_OBJECT;
+						} else {
+							brush.sprite = g_map.gsprite[c];
+							brush.flags = 0;
+							brush.layer = LAYER_FLOOR;
+						}
+						g_pal_tab = brush.layer;
 					}
 				}
 			}
@@ -978,6 +1232,10 @@ int main(int argc, char *argv[])
 				camy -= pan;
 			}
 		}
+
+		/* The client's world runs at 24Hz; match it so animated tiles cycle at
+		 * the same speed here as they do in game. */
+		g_anim_tick = (tick_t)(SDL_GetTicks() * 24 / 1000);
 
 		sdl_clear();
 		render_clear_clip();
