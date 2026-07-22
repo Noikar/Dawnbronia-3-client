@@ -56,6 +56,10 @@
  *                  only offer sprites a map already uses, so a brand-new area
  *                  starts with one brush and needs to borrow to be paintable.
  *                  Same as the "from zone" dropdown in the palette panel.
+ *     --selftest   round-trip the mouse->tile inverse against the forward
+ *                  projection at every zoom, print the result and exit. A
+ *                  --shot screenshot proves rendering but never input, so this
+ *                  is the only headless guard on the pointer math.
  *
  * Note --out= writes a second .map. Never aim it inside a live zone folder: the
  * server loads EVERY .map in a zone dir, in unspecified readdir order, and a
@@ -898,20 +902,42 @@ static int create_new_area(const char *zones_root, int n, const char *name)
 	return 0;
 }
 
+/* Window pixel -> logical draw coordinate.
+ *
+ * The renderer draws straight into the window and scales as it goes:
+ *   window = (logical + offset) * sdl_scale        (sdl_draw.c:261)
+ * so the inverse needs BOTH terms. Every mouse position must come through here.
+ *
+ * The division is easy to lose: the tool ran at sdl_scale 1 until it went
+ * borderless, and at scale 1 window and logical pixels are the same number, so
+ * an offset-only inverse looks perfectly correct right up until it isn't. */
+static void win_to_logical(int wx, int wy, double *lx, double *ly)
+{
+	*lx = (double)wx / sdl_scale - x_offset;
+	*ly = (double)wy / sdl_scale - y_offset;
+}
+
 /* Convert a window-space mouse position to fractional map coordinates (the exact
  * inverse of the draw projection). Kept separate from pick_tile because zooming
  * about the cursor needs the un-rounded position. */
 static void pick_tile_frac(int mouse_x, int mouse_y, double camx, double camy, int w, int h, double *fx, double *fy)
 {
-	/* window -> logical draw space */
-	double lx = (mouse_x - x_offset), ly = (mouse_y - y_offset);
+	double lx, ly;
+	win_to_logical(mouse_x, mouse_y, &lx, &ly);
+
 	double cx = w / 2.0, cy = h / 2.0 - hdy();
 
 	double u = (lx - cx) / hdx(); /* = dx - dy */
 	double v = (ly - cy) / hdy(); /* = dx + dy */
 
-	*fx = camx + (u + v) / 2.0;
-	*fy = camy + (v - u) / 2.0;
+	/* Truncate the camera exactly as draw_zone/draw_highlight do. The renderer
+	 * can only place the grid on a whole tile, so a fractional camera -- which
+	 * content_center produces whenever the painted extent spans an even number
+	 * of tiles -- is simply not representable on screen. Inverting against the
+	 * fractional value instead puts the pick half a tile out of step with the
+	 * grid that was actually drawn, which rounds to a whole tile of error. */
+	*fx = (int)camx + (u + v) / 2.0;
+	*fy = (int)camy + (v - u) / 2.0;
 }
 
 /* Convert a window-space mouse position to a map tile. Returns 1 and fills
@@ -945,6 +971,50 @@ static void draw_highlight(int mx, int my, double camx, double camy, int w, int 
 	render_line(sx, sy - hdy(), sx + hdx(), sy, col);
 	render_line(sx + hdx(), sy, sx, sy + hdy(), col);
 	render_line(sx, sy + hdy(), sx - hdx(), sy, col);
+}
+
+/* Round-trip check on the mouse -> tile inverse.
+ *
+ * A --shot screenshot verifies rendering but never input, which is how an
+ * offset-only window->logical conversion survived the move to sdl_scale 2: the
+ * hover highlight tracked a cursor twice as far from the window origin as the
+ * real one, and no headless run could notice. This walks tiles through the
+ * exact forward projection draw_highlight uses, converts to a window pixel the
+ * way the renderer does (sdl_draw.c:261), and asserts pick_tile hands the same
+ * tile back -- at every zoom, since hdx()/hdy() scale the projection too.
+ *
+ * Returns the number of failures. */
+static int selftest_pick(double camx, double camy, int w, int h)
+{
+	int saved_zoom = g_zoom, fails = 0, checks = 0;
+	int icamx = (int)camx, icamy = (int)camy;
+
+	for (size_t z = 0; z < sizeof zoom_steps / sizeof zoom_steps[0]; z++) {
+		g_zoom = zoom_steps[z];
+
+		for (int dy = -6; dy <= 6; dy += 3) {
+			for (int dx = -6; dx <= 6; dx += 3) {
+				/* forward: tile -> logical screen -> window pixel */
+				int lsx = (dx - dy) * hdx() + w / 2;
+				int lsy = (dx + dy) * hdy() + h / 2 - hdy();
+				int wx = (lsx + x_offset) * sdl_scale;
+				int wy = (lsy + y_offset) * sdl_scale;
+
+				int gx, gy;
+				checks++;
+				if (!pick_tile(wx, wy, camx, camy, w, h, &gx, &gy) || gx != icamx + dx || gy != icamy + dy) {
+					fprintf(stderr, "  FAIL zoom %3d%%: tile %d,%d -> px %d,%d -> got %d,%d\n", g_zoom, icamx + dx,
+					    icamy + dy, wx, wy, gx, gy);
+					fails++;
+				}
+			}
+		}
+	}
+
+	g_zoom = saved_zoom;
+	fprintf(stderr, "zoneedit: selftest pick: %d/%d round-trips ok (scale %d, canvas %dx%d, offset %d,%d)\n",
+	    checks - fails, checks, sdl_scale, w, h, x_offset, y_offset);
+	return fails;
 }
 
 /* -------------------------------------------------------------- paint tools --
@@ -1316,7 +1386,8 @@ static void dropdown_popup_rect(int count, int bx1, int by1, int h, int *px0, in
 static int dropdown_pick(const dropdown_t *dd, int mouse_x, int mouse_y, int count, int bx0, int by0, int bx1, int by1,
     int h, int *out_hover)
 {
-	double lx = mouse_x - x_offset, ly = mouse_y - y_offset;
+	double lx, ly;
+	win_to_logical(mouse_x, mouse_y, &lx, &ly);
 
 	if (out_hover) {
 		*out_hover = -1;
@@ -1645,7 +1716,9 @@ static int palette_cell_rect(int idx, int w, int h, int *cx0, int *cy0)
 /* Window-pixel click -> palette cell index, or one of the PAL_* results above. */
 static int palette_pick(int mouse_x, int mouse_y, int w, int h)
 {
-	double lx = mouse_x - x_offset, ly = mouse_y - y_offset;
+	double lx, ly;
+	win_to_logical(mouse_x, mouse_y, &lx, &ly);
+
 	int x0, y0, x1, y1;
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
 	if (lx < x0 || lx >= x1 || ly < y0 || ly >= y1) {
@@ -1873,6 +1946,7 @@ int main(int argc, char *argv[])
 	int hl_x = -1, hl_y = -1; /* --highlight tile                        */
 	int window_mode_set = 0; /* --windowed/--borderless given explicitly */
 	int palette_from = 0; /* --palette-from: borrow brushes from this zone */
+	int selftest = 0; /* --selftest: check the mouse->tile inverse and exit */
 
 	/* Scripted edits (also drivable interactively): set gsprite at a tile. */
 	int set_x[64], set_y[64];
@@ -2005,6 +2079,8 @@ int main(int argc, char *argv[])
 			new_area = atoi(argv[i] + 11);
 		} else if (!strncmp(argv[i], "--area-name=", 12)) {
 			area_name = argv[i] + 12;
+		} else if (!strcmp(argv[i], "--selftest")) {
+			selftest = 1;
 		} else if (!strcmp(argv[i], "--show-flags")) {
 			g_show_flags = 1;
 		} else if (!strcmp(argv[i], "--allow-live")) {
@@ -2226,6 +2302,12 @@ int main(int argc, char *argv[])
 		content_center(&camx, &camy);
 	}
 	fprintf(stderr, "zoneedit: camera at %.0f,%.0f, view %dx%d\n", camx, camy, w, h);
+
+	if (selftest) {
+		int fails = selftest_pick(camx, camy, w, h);
+		sdl_exit();
+		return fails ? 1 : 0;
+	}
 
 	/* Brushes come from the loaded map by default; --palette-from borrows another
 	 * zone's, which is what makes a freshly created area paintable at all. */
