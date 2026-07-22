@@ -844,6 +844,156 @@ static void draw_highlight(int mx, int my, double camx, double camy, int w, int 
 	render_line(sx, sy + FDY / 2, sx - FDX / 2, sy, col);
 }
 
+/* -------------------------------------------------------------- paint tools --
+ * Every tool (click, drag, rectangle, flood) goes through paint_cell/erase_cell
+ * so a tile painted by the bucket is identical to one painted by hand. */
+
+/* Which of the two sprite layers an edit applies to. A brush remembers the
+ * layer it was picked from, so paint and erase always hit the right one. */
+#define LAYER_FLOOR  0
+#define LAYER_OBJECT 1
+
+typedef struct {
+	unsigned int sprite;
+	unsigned int flags;
+	int layer; /* LAYER_FLOOR / LAYER_OBJECT */
+} brush_t;
+
+/* Apply the brush to one cell. An object carries its flags along, so a painted
+ * wall blocks sight/movement the way that same wall does elsewhere in the zone. */
+static void paint_cell(size_t c, brush_t b)
+{
+	if (b.layer == LAYER_OBJECT) {
+		g_map.fsprite[c] = b.sprite;
+		g_map.flags[c] = b.flags;
+	} else {
+		g_map.gsprite[c] = b.sprite;
+	}
+}
+
+/* Clear the brush's own layer; clearing the object layer drops the flags that
+ * object brought with it. */
+static void erase_cell(size_t c, brush_t b)
+{
+	if (b.layer == LAYER_OBJECT) {
+		g_map.fsprite[c] = 0;
+		g_map.flags[c] = 0;
+		g_place_sprite[c] = 0;
+	} else {
+		g_map.gsprite[c] = 0;
+	}
+}
+
+static unsigned int layer_value(size_t c, int layer)
+{
+	return (layer == LAYER_OBJECT) ? g_map.fsprite[c] : g_map.gsprite[c];
+}
+
+/* Fill the tile rectangle spanned by two corners (either order). */
+static void fill_rect(int x0, int y0, int x1, int y1, brush_t b, int erase)
+{
+	int t, x, y;
+	if (x0 > x1) {
+		t = x0;
+		x0 = x1;
+		x1 = t;
+	}
+	if (y0 > y1) {
+		t = y0;
+		y0 = y1;
+		y1 = t;
+	}
+	for (y = y0; y <= y1; y++) {
+		for (x = x0; x <= x1; x++) {
+			if (x < 0 || y < 0 || x >= MAXMAP || y >= MAXMAP) {
+				continue;
+			}
+			if (erase) {
+				erase_cell(cellof(x, y), b);
+			} else {
+				paint_cell(cellof(x, y), b);
+			}
+		}
+	}
+}
+
+/* Replace the 4-connected region of like-valued tiles under (sx,sy).
+ * Iterative with an explicit queue rather than recursive: a region can span the
+ * whole 256x256 grid, which would overflow the stack. */
+static void flood_fill(int sx, int sy, brush_t b, int erase)
+{
+	static int queue[MAXMAP * MAXMAP];
+	static unsigned char seen[MAXMAP * MAXMAP];
+	static const int ndx[4] = {1, -1, 0, 0};
+	static const int ndy[4] = {0, 0, 1, -1};
+
+	if (sx < 0 || sy < 0 || sx >= MAXMAP || sy >= MAXMAP) {
+		return;
+	}
+	unsigned int target = layer_value(cellof(sx, sy), b.layer);
+	unsigned int repl = erase ? 0u : b.sprite;
+	if (target == repl) {
+		return; /* no-op, and guards against spreading forever */
+	}
+
+	memset(seen, 0, sizeof(seen));
+	int head = 0, tail = 0, k;
+	queue[tail++] = (int)cellof(sx, sy);
+	seen[cellof(sx, sy)] = 1;
+
+	while (head < tail) {
+		int ci = queue[head++];
+		int x = ci % MAXMAP, y = ci / MAXMAP;
+		if (erase) {
+			erase_cell((size_t)ci, b);
+		} else {
+			paint_cell((size_t)ci, b);
+		}
+		for (k = 0; k < 4; k++) {
+			int nx = x + ndx[k], ny = y + ndy[k];
+			if (nx < 0 || ny < 0 || nx >= MAXMAP || ny >= MAXMAP) {
+				continue;
+			}
+			size_t nc = cellof(nx, ny);
+			if (seen[nc] || layer_value(nc, b.layer) != target) {
+				continue;
+			}
+			seen[nc] = 1;
+			queue[tail++] = (int)nc;
+		}
+	}
+}
+
+/* Outline the tile rectangle being dragged, so the fill area is visible before
+ * you commit to it. Connects the four corner tiles in screen space. */
+static void draw_rect_outline(int x0, int y0, int x1, int y1, double camx, double camy, int w, int h)
+{
+	int cx = w / 2, cy = h / 2, t;
+	if (x0 > x1) {
+		t = x0;
+		x0 = x1;
+		x1 = t;
+	}
+	if (y0 > y1) {
+		t = y0;
+		y0 = y1;
+		y1 = t;
+	}
+
+	int cor[4][2] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+	int px[4], py[4], i;
+	for (i = 0; i < 4; i++) {
+		int dx = cor[i][0] - (int)camx, dy = cor[i][1] - (int)camy;
+		px[i] = (dx - dy) * (FDX / 2) + cx;
+		py[i] = (dx + dy) * (FDY / 2) + cy - FDY / 2;
+	}
+	unsigned short col = 0x07FF; /* cyan (RGB565) */
+	for (i = 0; i < 4; i++) {
+		int j = (i + 1) & 3;
+		render_line(px[i], py[i], px[j], py[j], col);
+	}
+}
+
 /* True if a file already exists at path. Drives the live-content guard: by
  * default the editor refuses to save over anything that existed when it
  * launched, so a live zone can never be clobbered by accident. --allow-live
@@ -961,19 +1111,10 @@ static int save_map(const zio_map *m, const char *path)
 #define PAL_HDR  14 /* header-label height            */
 #define PAL_TABH 16 /* tab-strip height               */
 
-#define LAYER_FLOOR  0
-#define LAYER_OBJECT 1
-
 typedef struct {
 	unsigned int sprite; /* packed 32-bit value as stored in the map      */
 	unsigned int flags; /* flags this sprite most often carries (objects) */
 } pal_entry;
-
-typedef struct {
-	unsigned int sprite;
-	unsigned int flags;
-	int layer; /* LAYER_FLOOR / LAYER_OBJECT */
-} brush_t;
 
 static pal_entry g_pal[2][8192]; /* [layer][idx] */
 static int g_pal_count[2] = {0, 0};
@@ -1249,8 +1390,8 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 		snprintf(line, sizeof line, "brush %u (%s)   (hover a tile)", brush.sprite, layer);
 	}
 	render_text(8, h - 16, IRGB(24, 31, 24), 0, line);
-	render_text(
-	    w - 420, h - 16, IRGB(24, 24, 31), 0, "LMB paint  RMB erase  MMB pick  TAB layer  F5 save  WASD pan  ESC quit");
+	render_text(w - 560, h - 16, IRGB(24, 24, 31), 0,
+	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  F5 save  ESC quit");
 }
 
 int main(int argc, char *argv[])
@@ -1277,6 +1418,16 @@ int main(int argc, char *argv[])
 	int new_area = 0;
 	int claim_area = 0, unclaim_area = 0;
 	const char *area_name = NULL;
+
+	/* Scripted rectangle fills (--fill), the batch form of shift+drag. */
+	int fill_x0[16], fill_y0[16], fill_x1[16], fill_y1[16];
+	unsigned int fill_g[16];
+	int nfill = 0;
+
+	/* Scripted flood fills (--bucket), the batch form of ctrl+click. */
+	int bucket_x[16], bucket_y[16];
+	unsigned int bucket_g[16];
+	int nbucket = 0;
 
 	/* Scripted warps: place a teleport door at (sx,sy) -> area (dx,dy). */
 	int warp_sx[64], warp_sy[64], warp_a[64], warp_dx[64], warp_dy[64];
@@ -1339,6 +1490,23 @@ int main(int argc, char *argv[])
 				nlink++;
 			} else {
 				fprintf(stderr, "zoneedit: bad --link (want sx,sy,destarea,dx,dy[,sprite])\n");
+			}
+		} else if (!strncmp(argv[i], "--fill=", 7)) {
+			/* Batch rectangle fill -- the scripted form of shift+drag, and the
+			 * quickest way to enlarge a map's painted area. */
+			if (nfill < 16 && sscanf(argv[i] + 7, "%d,%d,%d,%d,%u", &fill_x0[nfill], &fill_y0[nfill], &fill_x1[nfill],
+			                      &fill_y1[nfill], &fill_g[nfill]) == 5) {
+				nfill++;
+			} else {
+				fprintf(stderr, "zoneedit: bad --fill (want x0,y0,x1,y1,gsprite)\n");
+			}
+		} else if (!strncmp(argv[i], "--bucket=", 9)) {
+			/* Batch flood fill -- the scripted form of ctrl+click. */
+			if (nbucket < 16 &&
+			    sscanf(argv[i] + 9, "%d,%d,%u", &bucket_x[nbucket], &bucket_y[nbucket], &bucket_g[nbucket]) == 3) {
+				nbucket++;
+			} else {
+				fprintf(stderr, "zoneedit: bad --bucket (want x,y,gsprite)\n");
 			}
 		} else if (!strncmp(argv[i], "--claim=", 8)) {
 			claim_area = atoi(argv[i] + 8);
@@ -1474,6 +1642,22 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "zoneedit: LIVE EDIT enabled - saves overwrite %s (a backup is written first)\n", save_path);
 	}
 
+	/* Scripted rectangle fills. Runs before placements so a fill can lay down
+	 * the ground a later --place or --link needs. */
+	for (i = 0; i < nfill; i++) {
+		brush_t fb = {fill_g[i], 0, LAYER_FLOOR};
+		fill_rect(fill_x0[i], fill_y0[i], fill_x1[i], fill_y1[i], fb, 0);
+		fprintf(stderr, "zoneedit: filled (%d,%d)-(%d,%d) with gsprite %u\n", fill_x0[i], fill_y0[i], fill_x1[i],
+		    fill_y1[i], fill_g[i]);
+	}
+
+	for (i = 0; i < nbucket; i++) {
+		brush_t bb = {bucket_g[i], 0, LAYER_FLOOR};
+		flood_fill(bucket_x[i], bucket_y[i], bb, 0);
+		fprintf(
+		    stderr, "zoneedit: bucket-filled from (%d,%d) with gsprite %u\n", bucket_x[i], bucket_y[i], bucket_g[i]);
+	}
+
 	/* Generate + place scripted warp doors (writes the zone's warps.itm). */
 	for (i = 0; i < nwarp; i++) {
 		add_warp(zonedir, warp_sx[i], warp_sy[i], warp_a[i], warp_dx[i], warp_dy[i], warp_sp[i], !save_locked);
@@ -1501,7 +1685,7 @@ int main(int argc, char *argv[])
 	/* Save the (edited) map if requested (blocked when the target is locked).
 	 * A claimed zone also saves its scripted edits in place -- otherwise the only
 	 * batch route would be --out, which must never point inside a zone folder. */
-	int batch_edits = nset + nflag + nplace + nwarp + nlink;
+	int batch_edits = nset + nflag + nplace + nwarp + nlink + nfill + nbucket;
 	if ((out_path || nlink || (g_zone_claimed && batch_edits)) && !save_locked) {
 		if (save_map(&g_map, save_path) == 0) {
 			fprintf(stderr, "zoneedit: wrote map %s\n", save_path);
@@ -1550,6 +1734,11 @@ int main(int argc, char *argv[])
 
 	/* Start on whatever the camera is sitting on. */
 	brush_t brush = {g_map.gsprite[cellof((int)camx, (int)camy)], 0, LAYER_FLOOR};
+
+	/* Paint-tool state: which button is held for a drag stroke, and the anchor
+	 * corner of an in-progress shift+drag rectangle. */
+	int drag_button = 0;
+	int rect_active = 0, rect_x0 = 0, rect_y0 = 0, rect_btn = 0;
 	int running = 1, frame = 0;
 	const double pan = 1.0; /* tiles per frame while a pan key is held */
 	while (running) {
@@ -1592,26 +1781,25 @@ int main(int argc, char *argv[])
 					}
 				} else if (pk == PAL_OUTSIDE && have_hover) { /* over the map, not the panel */
 					size_t c = cellof(hx, hy);
-					if (e.button.button == SDL_BUTTON_LEFT) {
-						if (brush.layer == LAYER_OBJECT) {
-							/* Objects bring their usual flags along, so a painted
-							 * wall blocks sight/movement the way that same wall
-							 * does everywhere else in the zone. */
-							g_map.fsprite[c] = brush.sprite;
-							g_map.flags[c] = brush.flags;
-						} else {
-							g_map.gsprite[c] = brush.sprite;
-						}
-					} else if (e.button.button == SDL_BUTTON_RIGHT) {
-						/* Erase the brush's own layer; clearing the object layer
-						 * drops the flags it brought with it. */
-						if (brush.layer == LAYER_OBJECT) {
-							g_map.fsprite[c] = 0;
-							g_map.flags[c] = 0;
-							g_place_sprite[c] = 0;
-						} else {
-							g_map.gsprite[c] = 0;
-						}
+					SDL_Keymod mod = SDL_GetModState();
+					int is_paint = (e.button.button == SDL_BUTTON_LEFT);
+					int is_erase = (e.button.button == SDL_BUTTON_RIGHT);
+
+					if ((mod & SDL_KMOD_CTRL) && (is_paint || is_erase)) {
+						/* Ctrl+click = bucket: recolor the connected region. */
+						flood_fill(hx, hy, brush, is_erase);
+					} else if ((mod & SDL_KMOD_SHIFT) && (is_paint || is_erase)) {
+						/* Shift+drag = rectangle; anchor here, fill on release. */
+						rect_active = 1;
+						rect_x0 = hx;
+						rect_y0 = hy;
+						rect_btn = e.button.button;
+					} else if (is_paint) {
+						paint_cell(c, brush);
+						drag_button = SDL_BUTTON_LEFT; /* keep painting while held */
+					} else if (is_erase) {
+						erase_cell(c, brush);
+						drag_button = SDL_BUTTON_RIGHT;
 					} else if (e.button.button == SDL_BUTTON_MIDDLE) { /* eyedropper */
 						if (g_map.fsprite[c] & 0xFFFF) {
 							brush.sprite = g_map.fsprite[c];
@@ -1624,6 +1812,27 @@ int main(int argc, char *argv[])
 						}
 						g_pal_tab = brush.layer;
 					}
+				}
+			} else if (e.type == SDL_EVENT_MOUSE_MOTION) {
+				/* Drag-paint: a stroke is just the click op repeated over each
+				 * tile the cursor crosses. Re-check the palette so dragging onto
+				 * the panel does not paint underneath it. */
+				if (drag_button && have_hover && palette_pick((int)e.motion.x, (int)e.motion.y, w, h) == PAL_OUTSIDE) {
+					if (drag_button == SDL_BUTTON_LEFT) {
+						paint_cell(cellof(hx, hy), brush);
+					} else {
+						erase_cell(cellof(hx, hy), brush);
+					}
+				}
+			} else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+				if (rect_active && e.button.button == rect_btn) {
+					if (have_hover) {
+						fill_rect(rect_x0, rect_y0, hx, hy, brush, rect_btn == SDL_BUTTON_RIGHT);
+					}
+					rect_active = 0;
+				}
+				if (e.button.button == drag_button) {
+					drag_button = 0;
 				}
 			}
 		}
@@ -1659,6 +1868,9 @@ int main(int argc, char *argv[])
 		}
 		if (hl_x >= 0 && hl_y >= 0) {
 			draw_highlight(hl_x, hl_y, camx, camy, w, h);
+		}
+		if (rect_active && have_hover) {
+			draw_rect_outline(rect_x0, rect_y0, hx, hy, camx, camy, w, h);
 		}
 		draw_hud(w, h, have_hover, hx, hy, brush, save_path, save_locked);
 		draw_palette(w, h, brush);
