@@ -50,6 +50,12 @@
  *                  (implied by --shot, so screenshots stay a fixed size).
  *     --borderless force borderless even for a --shot run.
  *     --zoom       start at this zoom percentage: 50, 100, 150 or 200.
+ *     --palette-from
+ *                  fill the brush palette from THIS zone instead of the loaded
+ *                  one (edits still apply to the loaded map). The palette can
+ *                  only offer sprites a map already uses, so a brand-new area
+ *                  starts with one brush and needs to borrow to be paintable.
+ *                  Same as the "from zone" dropdown in the palette panel.
  *
  * Note --out= writes a second .map. Never aim it inside a live zone folder: the
  * server loads EVERY .map in a zone dir, in unspecified readdir order, and a
@@ -115,6 +121,7 @@ extern void render_sprite(unsigned int sprite, int scrx, int scry, char light, c
 extern void render_line(int fx, int fy, int tx, int ty, unsigned short col);
 extern void render_create_font(void); /* builds the shaded/framed fonts from font.c */
 extern int render_text(int sx, int sy, unsigned short color, int flags, const char *text);
+extern int render_text_length(int flags, const char *text);
 extern void render_rect_alpha(int sx, int sy, int ex, int ey, unsigned short color, unsigned char alpha);
 extern void render_set_clip(int sx, int sy, int ex, int ey);
 extern void render_set_offset(int x, int y);
@@ -1189,6 +1196,231 @@ static int save_map(const zio_map *m, const char *path)
 	return zio_map_write(m, path);
 }
 
+/* --------------------------------------------------------- zone list ------- *
+ * The zones a palette can be borrowed from: every numeric folder under the
+ * zones root that actually holds a .map. Each is labeled with its number plus
+ * the base name of that map ("3 above3"), which says a good deal more about
+ * what a zone is than the bare number does. */
+#define ZL_MAX 256
+
+typedef struct {
+	int area;
+	char label[24];
+} zone_entry;
+
+static zone_entry g_zones[ZL_MAX];
+static int g_zone_count = 0;
+
+static int zone_entry_cmp(const void *a, const void *b)
+{
+	const zone_entry *za = a, *zb = b;
+	return za->area - zb->area;
+}
+
+static void zone_list_build(const char *zones_root)
+{
+	DIR *d = opendir(zones_root);
+	if (!d) {
+		fprintf(stderr, "zoneedit: cannot scan %s for zones\n", zones_root);
+		return;
+	}
+
+	struct dirent *de;
+	g_zone_count = 0;
+	while ((de = readdir(d)) && g_zone_count < ZL_MAX) {
+		const char *n = de->d_name;
+		if (!*n || strspn(n, "0123456789") != strlen(n)) {
+			continue; /* ".", "..", "generic" */
+		}
+
+		char dir[1024], mapfile[1024];
+		snprintf(dir, sizeof dir, "%s/%s", zones_root, n);
+		if (!find_map_file(dir, mapfile, sizeof mapfile)) {
+			continue; /* no map -> no brushes to harvest */
+		}
+
+		const char *base = strrchr(mapfile, '/');
+		base = base ? base + 1 : mapfile;
+
+		char stem[24];
+		snprintf(stem, sizeof stem, "%s", base);
+		char *dot = strrchr(stem, '.');
+		if (dot) {
+			*dot = 0;
+		}
+
+		g_zones[g_zone_count].area = atoi(n);
+		snprintf(g_zones[g_zone_count].label, sizeof g_zones[0].label, "%s %s", n, stem);
+		g_zone_count++;
+	}
+	closedir(d);
+
+	qsort(g_zones, (size_t)g_zone_count, sizeof g_zones[0], zone_entry_cmp);
+}
+
+static const char *zone_list_label(int idx)
+{
+	return (idx >= 0 && idx < g_zone_count) ? g_zones[idx].label : "";
+}
+
+/* ---------------------------------------------------------- dropdown ------- *
+ * The tool's first real widget: a labeled button that opens a scrolling popup
+ * list. It is written against the pattern the tile palette proved out -- an
+ * alpha-filled backdrop, a clip rect per row, and a *_pick() that converts
+ * window pixels to logical ones through x_offset/y_offset -- and deliberately
+ * knows nothing about zones: items come in through a label callback. That is
+ * what lets the reusable widget layer (G2) lift it out unchanged when buttons,
+ * checkboxes and text fields join it.
+ *
+ * The popup is drawn last and hit-tested first, so it sits above the palette
+ * and can overhang the map without clicks falling through to the paint tools. */
+#define DD_ROWH    12 /* row height, logical px          */
+#define DD_MAXROWS 20 /* rows before the list scrolls    */
+#define DD_WIDTH   152 /* popup width (wider than the palette panel) */
+
+typedef struct {
+	int open;
+	int scroll; /* first visible row */
+} dropdown_t;
+
+typedef const char *(*dd_label_fn)(int idx);
+
+/* Pick results that are not an item index. */
+#define DD_NONE   (-3) /* nowhere near the widget -> not ours          */
+#define DD_BUTTON (-2) /* on the button -> toggle the popup            */
+#define DD_CHROME (-1) /* on popup chrome -> swallow, keep it open     */
+
+static int dropdown_rows_visible(int count, int by1, int h)
+{
+	int rows = count < DD_MAXROWS ? count : DD_MAXROWS;
+	int room = (h - 22 - by1) / DD_ROWH; /* stop short of the status bar */
+
+	if (rows > room) {
+		rows = room;
+	}
+	return rows < 1 ? 1 : rows;
+}
+
+/* Popup rect: hangs below the button, right edges aligned so a popup wider than
+ * its button grows leftward over the map rather than off the canvas. */
+static void dropdown_popup_rect(int count, int bx1, int by1, int h, int *px0, int *py0, int *px1, int *py1)
+{
+	int rows = dropdown_rows_visible(count, by1, h);
+
+	*px1 = bx1;
+	*px0 = bx1 - DD_WIDTH;
+	*py0 = by1;
+	*py1 = by1 + rows * DD_ROWH + 2;
+}
+
+static int dropdown_pick(const dropdown_t *dd, int mouse_x, int mouse_y, int count, int bx0, int by0, int bx1, int by1,
+    int h, int *out_hover)
+{
+	double lx = mouse_x - x_offset, ly = mouse_y - y_offset;
+
+	if (out_hover) {
+		*out_hover = -1;
+	}
+
+	if (dd->open) {
+		int px0, py0, px1, py1;
+		dropdown_popup_rect(count, bx1, by1, h, &px0, &py0, &px1, &py1);
+		if (lx >= px0 && lx < px1 && ly >= py0 && ly < py1) {
+			int row = (int)((ly - py0 - 1) / DD_ROWH);
+			int idx = dd->scroll + row;
+			if (row >= 0 && row < dropdown_rows_visible(count, by1, h) && idx >= 0 && idx < count) {
+				if (out_hover) {
+					*out_hover = idx;
+				}
+				return idx;
+			}
+			return DD_CHROME;
+		}
+	}
+
+	if (lx >= bx0 && lx < bx1 && ly >= by0 && ly < by1) {
+		return DD_BUTTON;
+	}
+	return DD_NONE;
+}
+
+static void dropdown_scroll(dropdown_t *dd, int delta, int count, int by1, int h)
+{
+	int max_row = count - dropdown_rows_visible(count, by1, h);
+
+	if (max_row < 0) {
+		max_row = 0;
+	}
+	dd->scroll += delta;
+	if (dd->scroll < 0) {
+		dd->scroll = 0;
+	}
+	if (dd->scroll > max_row) {
+		dd->scroll = max_row;
+	}
+}
+
+/* The button. Drawn in place in the panel; `value` is the current selection. */
+static void dropdown_draw_button(const dropdown_t *dd, const char *caption, const char *value, int bx0, int by0,
+    int bx1, int by1, int w, int h, unsigned short value_color)
+{
+	char line[64];
+
+	render_rect_alpha(bx0 + 1, by0, bx1 - 1, by1 - 1, dd->open ? IRGB(10, 10, 18) : IRGB(5, 5, 10), 255);
+	render_set_clip(bx0 + 1, by0, bx1 - 11, by1 - 1);
+	snprintf(line, sizeof line, "%s %s", caption, value);
+	render_text(bx0 + 4, by0 + 3, value_color, 0, line);
+	render_set_clip(0, 0, w, h);
+	render_text(bx1 - 9, by0 + 3, IRGB(20, 20, 24), 0, dd->open ? "^" : "v");
+}
+
+/* The popup list. Kept separate from the button so the caller can draw it LAST,
+ * over everything else -- a popup that overhangs the panel must not end up
+ * underneath the palette cells that are painted after it. `sel` is the current
+ * item, `hover` the one under the cursor; both may be -1. */
+static void dropdown_draw_popup(
+    const dropdown_t *dd, dd_label_fn label, int count, int sel, int hover, int bx1, int by1, int w, int h)
+{
+	if (!dd->open) {
+		return;
+	}
+
+	int px0, py0, px1, py1;
+	dropdown_popup_rect(count, bx1, by1, h, &px0, &py0, &px1, &py1);
+	render_rect_alpha(px0, py0, px1, py1, IRGB(2, 2, 6), 250);
+
+	unsigned short edge = IRGB(14, 14, 20);
+	render_line(px0, py0, px1, py0, edge);
+	render_line(px1, py0, px1, py1, edge);
+	render_line(px1, py1, px0, py1, edge);
+	render_line(px0, py1, px0, py0, edge);
+
+	int rows = dropdown_rows_visible(count, by1, h);
+	for (int r = 0; r < rows; r++) {
+		int idx = dd->scroll + r;
+		if (idx >= count) {
+			break;
+		}
+
+		int ry = py0 + 1 + r * DD_ROWH;
+		if (idx == hover) {
+			render_rect_alpha(px0 + 1, ry, px1 - 1, ry + DD_ROWH, IRGB(8, 8, 16), 255);
+		}
+
+		render_set_clip(px0 + 2, ry, px1 - 2, ry + DD_ROWH);
+		render_text(px0 + 5, ry + 2, (idx == sel) ? IRGB(31, 31, 16) : IRGB(22, 22, 26), 0, label(idx));
+		render_set_clip(0, 0, w, h);
+	}
+
+	/* "there is more below/above" marks, since the list has no scrollbar yet */
+	if (dd->scroll > 0) {
+		render_text(px1 - 10, py0 + 1, IRGB(16, 16, 20), 0, "^");
+	}
+	if (dd->scroll + rows < count) {
+		render_text(px1 - 10, py1 - DD_ROWH, IRGB(16, 16, 20), 0, "v");
+	}
+}
+
 /* ------------------------------------------------------- tile palette ------ *
  * A visual brush picker (RPG-Maker style): the distinct sprites already present
  * in the loaded map, shown as clickable thumbnails on a right-side strip. Click
@@ -1207,6 +1439,8 @@ static int save_map(const zio_map *m, const char *path)
 #define PAL_HDR  14 /* header-label height            */
 #define PAL_TABH 16 /* tab-strip height               */
 
+#define PAL_SRCH 15 /* palette-source selector height */
+
 typedef struct {
 	unsigned int sprite; /* packed 32-bit value as stored in the map      */
 	unsigned int flags; /* flags this sprite most often carries (objects) */
@@ -1216,6 +1450,7 @@ static pal_entry g_pal[2][8192]; /* [layer][idx] */
 static int g_pal_count[2] = {0, 0};
 static int g_pal_scroll[2] = {0, 0}; /* first visible row, per tab */
 static int g_pal_tab = LAYER_FLOOR;
+static int g_pal_src_area = 0; /* zone the brushes were harvested from */
 
 /* Flag combinations seen for one sprite, so we can pick the most common. */
 #define PAL_MAXCOMBO 8
@@ -1232,18 +1467,19 @@ typedef struct {
  * combination. Recording the most common combination lets a painted wall behave
  * like a wall immediately, while a rug or a low decoration keeps its (empty)
  * flags -- which a blanket "objects always block" rule would get wrong. */
-static void palette_build(void)
+static void palette_build_from(const zio_map *src)
 {
 	static flag_combo combos[8192][PAL_MAXCOMBO];
 	static int combo_count[8192];
 	size_t n = (size_t)MAXMAP * MAXMAP;
 
 	g_pal_count[LAYER_FLOOR] = g_pal_count[LAYER_OBJECT] = 0;
+	g_pal_scroll[LAYER_FLOOR] = g_pal_scroll[LAYER_OBJECT] = 0;
 	memset(combo_count, 0, sizeof combo_count);
 
 	for (size_t i = 0; i < n; i++) {
 		for (int layer = 0; layer < 2; layer++) {
-			unsigned int v = (layer == LAYER_FLOOR) ? g_map.gsprite[i] : g_map.fsprite[i];
+			unsigned int v = (layer == LAYER_FLOOR) ? src->gsprite[i] : src->fsprite[i];
 			if (!(v & 0xFFFF)) {
 				continue;
 			}
@@ -1269,7 +1505,7 @@ static void palette_build(void)
 			}
 
 			/* Tally this placement's flag combination for the object brush. */
-			unsigned int fl = g_map.flags[i];
+			unsigned int fl = src->flags[i];
 			int c;
 			for (c = 0; c < combo_count[idx]; c++) {
 				if (combos[idx][c].flags == fl) {
@@ -1297,6 +1533,53 @@ static void palette_build(void)
 	}
 }
 
+/* Point the palette at another zone's brushes.
+ *
+ * palette_build_from() can only ever offer sprites that are already placed on a
+ * map, which is exactly what a brand-new area has none of: the new-area wizard's
+ * grass field yields a palette of a single brush, so the map cannot be painted
+ * with anything but the sprite it was born with. Borrowing loads the source
+ * zone's .map headlessly and harvests its brushes, while every edit still
+ * applies to the map that is open -- the palette is a catalog, not the content.
+ *
+ * Returns 0 on success; on failure the previous palette is left untouched. */
+static int palette_borrow(const char *zones_root, int from_area, int loaded_area)
+{
+	if (from_area == loaded_area) { /* the loaded map is already in memory */
+		palette_build_from(&g_map);
+		g_pal_src_area = loaded_area;
+		return 0;
+	}
+
+	char dir[1024], mapfile[1024], err[256];
+	snprintf(dir, sizeof dir, "%s/%d", zones_root, from_area);
+	if (!find_map_file(dir, mapfile, sizeof mapfile)) {
+		fprintf(stderr, "zoneedit: no .map in %s - palette unchanged\n", dir);
+		return 1;
+	}
+
+	zio_file *zf = zio_load(mapfile, ZIO_MAP, err, sizeof err);
+	if (!zf) {
+		fprintf(stderr, "zoneedit: cannot load %s: %s - palette unchanged\n", mapfile, err);
+		return 1;
+	}
+
+	zio_map src;
+	int rc = zio_map_parse(zf, &src, err, sizeof err);
+	zio_free(zf);
+	if (rc != 0) {
+		fprintf(stderr, "zoneedit: cannot parse %s: %s - palette unchanged\n", mapfile, err);
+		return 1;
+	}
+
+	palette_build_from(&src);
+	zio_map_free(&src);
+	g_pal_src_area = from_area;
+	fprintf(stderr, "zoneedit: palette borrowed from zone %d (%s): %d floor, %d object brushes\n", from_area, mapfile,
+	    g_pal_count[LAYER_FLOOR], g_pal_count[LAYER_OBJECT]);
+	return 0;
+}
+
 /* Panel rect, derived from the logical draw size (right edge, between the bars). */
 static void palette_rect(int w, int h, int *x0, int *y0, int *x1, int *y1)
 {
@@ -1311,8 +1594,19 @@ static int palette_rows_visible(int w, int h)
 {
 	int x0, y0, x1, y1;
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
-	int rows = (y1 - (y0 + PAL_HDR + PAL_TABH) - PAL_PAD) / PAL_CELL;
+	int rows = (y1 - (y0 + PAL_HDR + PAL_SRCH + PAL_TABH) - PAL_PAD) / PAL_CELL;
 	return rows < 0 ? 0 : rows;
+}
+
+/* Rect of the "borrow brushes from zone N" selector button, under the header. */
+static void palette_src_rect(int w, int h, int *sx0, int *sy0, int *sx1, int *sy1)
+{
+	int x0, y0, x1, y1;
+	palette_rect(w, h, &x0, &y0, &x1, &y1);
+	*sx0 = x0;
+	*sy0 = y0 + PAL_HDR;
+	*sx1 = x1;
+	*sy1 = *sy0 + PAL_SRCH;
 }
 
 /* Rect of tab `tab` in the tab strip. */
@@ -1322,7 +1616,7 @@ static void palette_tab_rect(int tab, int w, int h, int *tx0, int *ty0, int *tx1
 	palette_rect(w, h, &x0, &y0, &x1, &y1);
 	int half = (x1 - x0) / 2;
 	*tx0 = x0 + tab * half;
-	*ty0 = y0 + PAL_HDR;
+	*ty0 = y0 + PAL_HDR + PAL_SRCH;
 	*tx1 = (tab == 0) ? x0 + half : x1;
 	*ty1 = *ty0 + PAL_TABH;
 }
@@ -1338,7 +1632,7 @@ static int palette_cell_rect(int idx, int w, int h, int *cx0, int *cy0)
 		return 0;
 	}
 	*cx0 = x0 + PAL_PAD + col * PAL_CELL;
-	*cy0 = y0 + PAL_HDR + PAL_TABH + PAL_PAD + row * PAL_CELL;
+	*cy0 = y0 + PAL_HDR + PAL_SRCH + PAL_TABH + PAL_PAD + row * PAL_CELL;
 	return 1;
 }
 
@@ -1394,7 +1688,7 @@ static void palette_scroll(int delta, int w, int h)
 	}
 }
 
-static void draw_palette(int w, int h, brush_t brush)
+static void draw_palette(int w, int h, brush_t brush, int loaded_area, const dropdown_t *src_dd, int src_hover)
 {
 	static const char *tab_label[2] = {"FLOORS", "OBJECTS"};
 	int x0, y0, x1, y1;
@@ -1404,6 +1698,22 @@ static void draw_palette(int w, int h, brush_t brush)
 
 	snprintf(hdr, sizeof hdr, "%s %d", tab_label[g_pal_tab], g_pal_count[g_pal_tab]);
 	render_text(x0 + PAL_PAD, y0 + 3, IRGB(31, 31, 16), 0, hdr);
+
+	/* Palette-source selector. Brushes borrowed from another zone are shown in
+	 * amber: the palette no longer describes the map that is open, which matters
+	 * because painting from it introduces sprites the zone has never used. */
+	int sx0, sy0, sx1, sy1, sel = -1;
+	char src[32];
+	palette_src_rect(w, h, &sx0, &sy0, &sx1, &sy1);
+	for (int i = 0; i < g_zone_count; i++) {
+		if (g_zones[i].area == g_pal_src_area) {
+			sel = i;
+			break;
+		}
+	}
+	snprintf(src, sizeof src, "zone %d", g_pal_src_area);
+	dropdown_draw_button(src_dd, "from", src, sx0, sy0, sx1, sy1, w, h,
+	    (g_pal_src_area == loaded_area) ? IRGB(20, 20, 24) : IRGB(31, 24, 8));
 
 	/* tab strip: the active tab is lit, the other one dim */
 	for (int tab = 0; tab < 2; tab++) {
@@ -1433,13 +1743,16 @@ static void draw_palette(int w, int h, brush_t brush)
 		render_set_clip(0, 0, w, h);
 
 		if (g == brush.sprite && g_pal_tab == brush.layer) { /* selected outline */
-			unsigned short sel = IRGB(31, 31, 0);
-			render_line(cx0, cy0, cx1, cy0, sel);
-			render_line(cx1, cy0, cx1, cy1, sel);
-			render_line(cx1, cy1, cx0, cy1, sel);
-			render_line(cx0, cy1, cx0, cy0, sel);
+			unsigned short hi = IRGB(31, 31, 0);
+			render_line(cx0, cy0, cx1, cy0, hi);
+			render_line(cx1, cy0, cx1, cy1, hi);
+			render_line(cx1, cy1, cx0, cy1, hi);
+			render_line(cx0, cy1, cx0, cy0, hi);
 		}
 	}
+
+	/* Last, so an open list sits above the cells it overhangs. */
+	dropdown_draw_popup(src_dd, zone_list_label, g_zone_count, sel, src_hover, sx1, sy1, w, h);
 	reset_clip();
 }
 
@@ -1490,10 +1803,19 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 		snprintf(line, sizeof line, "brush %u (%s)   (hover a tile)", brush.sprite, layer);
 	}
 	render_text(8, h - 16, IRGB(24, 31, 24), 0, line);
-	render_text(w - 640, h - 16, IRGB(24, 24, 31), 0,
-	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  WHEEL zoom  F11 window  F5 save "
-	    " "
-	    "ESC quit");
+
+	/* Help text, right-aligned by measured width rather than a guessed offset --
+	 * the canvas ranges from an 800px windowed one to the full display, and a
+	 * fixed offset either ran under the status text on the left or floated away
+	 * from the right edge. Dropped entirely when it would still collide. */
+	const char *help =
+	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  P palette  WHEEL zoom  F11 "
+	    "window  F5 save  ESC quit";
+	int help_w = render_text_length(0, help);
+	int help_x = w - help_w - 8;
+	if (help_x > 8 + render_text_length(0, line) + 12) {
+		render_text(help_x, h - 16, IRGB(24, 24, 31), 0, help);
+	}
 }
 
 /* Window layout.
@@ -1550,6 +1872,7 @@ int main(int argc, char *argv[])
 	const char *mapfile_override = NULL; /* --mapfile: load this .map directly  */
 	int hl_x = -1, hl_y = -1; /* --highlight tile                        */
 	int window_mode_set = 0; /* --windowed/--borderless given explicitly */
+	int palette_from = 0; /* --palette-from: borrow brushes from this zone */
 
 	/* Scripted edits (also drivable interactively): set gsprite at a tile. */
 	int set_x[64], set_y[64];
@@ -1672,6 +1995,8 @@ int main(int argc, char *argv[])
 			} else {
 				fprintf(stderr, "zoneedit: bad --bucket (want x,y,gsprite)\n");
 			}
+		} else if (!strncmp(argv[i], "--palette-from=", 15)) {
+			palette_from = atoi(argv[i] + 15);
 		} else if (!strncmp(argv[i], "--claim=", 8)) {
 			claim_area = atoi(argv[i] + 8);
 		} else if (!strncmp(argv[i], "--unclaim=", 10)) {
@@ -1902,9 +2227,19 @@ int main(int argc, char *argv[])
 	}
 	fprintf(stderr, "zoneedit: camera at %.0f,%.0f, view %dx%d\n", camx, camy, w, h);
 
-	palette_build();
-	fprintf(stderr, "zoneedit: palette has %d floor and %d object brushes\n", g_pal_count[LAYER_FLOOR],
-	    g_pal_count[LAYER_OBJECT]);
+	/* Brushes come from the loaded map by default; --palette-from borrows another
+	 * zone's, which is what makes a freshly created area paintable at all. */
+	zone_list_build(zones_root);
+	palette_build_from(&g_map);
+	g_pal_src_area = area;
+	fprintf(stderr, "zoneedit: %d zones available; palette has %d floor and %d object brushes\n", g_zone_count,
+	    g_pal_count[LAYER_FLOOR], g_pal_count[LAYER_OBJECT]);
+	if (palette_from > 0) {
+		palette_borrow(zones_root, palette_from, area);
+	}
+
+	dropdown_t src_dd = {0, 0}; /* the palette-source selector */
+	int src_hover = -1;
 
 	/* Start on whatever the camera is sitting on. */
 	brush_t brush = {g_map.gsprite[cellof((int)camx, (int)camy)], 0, LAYER_FLOOR};
@@ -1920,13 +2255,26 @@ int main(int argc, char *argv[])
 		SDL_GetMouseState(&mfx, &mfy);
 		int hx, hy, have_hover = pick_tile((int)mfx, (int)mfy, camx, camy, w, h, &hx, &hy);
 
+		/* The palette-source selector claims the pointer before anything else, so
+		 * an open list is never painted through. Its rect is recomputed each frame
+		 * because the canvas can be resized (F11) underneath it. */
+		int sx0, sy0, sx1, sy1;
+		palette_src_rect(w, h, &sx0, &sy0, &sx1, &sy1);
+		int dd_hit = dropdown_pick(&src_dd, (int)mfx, (int)mfy, g_zone_count, sx0, sy0, sx1, sy1, h, &src_hover);
+
 		SDL_Event e;
 		while (SDL_PollEvent(&e)) {
 			if (e.type == SDL_EVENT_QUIT) {
 				running = 0;
 			} else if (e.type == SDL_EVENT_KEY_DOWN) {
 				if (e.key.key == SDLK_ESCAPE) {
-					running = 0;
+					if (src_dd.open) {
+						src_dd.open = 0; /* first ESC dismisses the list, not the tool */
+					} else {
+						running = 0;
+					}
+				} else if (e.key.key == SDLK_P) {
+					src_dd.open = !src_dd.open;
 				} else if (e.key.key == SDLK_TAB) {
 					g_pal_tab = (g_pal_tab == LAYER_FLOOR) ? LAYER_OBJECT : LAYER_FLOOR;
 				} else if (e.key.key == SDLK_F5) {
@@ -1951,9 +2299,12 @@ int main(int argc, char *argv[])
 			} else if (e.type == SDL_EVENT_WINDOW_RESIZED || e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
 				apply_layout(&w, &h);
 			} else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-				/* Over the palette the wheel still scrolls it; over the map it
-				 * zooms. palette_pick returns -2 for "outside the panel". */
-				if (palette_pick((int)mfx, (int)mfy, w, h) != -2) {
+				/* Over an open zone list the wheel scrolls that; over the palette
+				 * it scrolls the brushes; over the map it zooms. palette_pick
+				 * returns -2 for "outside the panel". */
+				if (dd_hit != DD_NONE && dd_hit != DD_BUTTON) {
+					dropdown_scroll(&src_dd, -(int)e.wheel.y, g_zone_count, sy1, h);
+				} else if (palette_pick((int)mfx, (int)mfy, w, h) != -2) {
 					palette_scroll(-(int)e.wheel.y, w, h);
 				} else {
 					/* Zoom about the cursor: find the map position under the
@@ -1971,8 +2322,26 @@ int main(int argc, char *argv[])
 					camy = floor(camy + (ay - by) + 0.5);
 				}
 			} else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+				int dk =
+				    dropdown_pick(&src_dd, (int)e.button.x, (int)e.button.y, g_zone_count, sx0, sy0, sx1, sy1, h, NULL);
 				int pk = palette_pick((int)e.button.x, (int)e.button.y, w, h);
-				if (pk == PAL_TAB0 || pk == PAL_TAB1) {
+
+				if (dk != DD_NONE) {
+					/* The selector owns this click: open/close it, or borrow the
+					 * chosen zone's brushes. Edits keep targeting the loaded map. */
+					if (e.button.button == SDL_BUTTON_LEFT) {
+						if (dk == DD_BUTTON) {
+							src_dd.open = !src_dd.open;
+						} else if (dk >= 0) {
+							palette_borrow(zones_root, g_zones[dk].area, area);
+							src_dd.open = 0;
+						}
+					}
+				} else if (src_dd.open) {
+					/* Click away closes the list and is swallowed, so dismissing it
+					 * cannot paint the tile that happened to be underneath. */
+					src_dd.open = 0;
+				} else if (pk == PAL_TAB0 || pk == PAL_TAB1) {
 					if (e.button.button == SDL_BUTTON_LEFT) {
 						g_pal_tab = (pk == PAL_TAB0) ? LAYER_FLOOR : LAYER_OBJECT;
 					}
@@ -2020,7 +2389,8 @@ int main(int argc, char *argv[])
 				/* Drag-paint: a stroke is just the click op repeated over each
 				 * tile the cursor crosses. Re-check the palette so dragging onto
 				 * the panel does not paint underneath it. */
-				if (drag_button && have_hover && palette_pick((int)e.motion.x, (int)e.motion.y, w, h) == PAL_OUTSIDE) {
+				if (drag_button && have_hover && !src_dd.open &&
+				    palette_pick((int)e.motion.x, (int)e.motion.y, w, h) == PAL_OUTSIDE) {
 					if (drag_button == SDL_BUTTON_LEFT) {
 						paint_cell(cellof(hx, hy), brush);
 					} else {
@@ -2076,7 +2446,7 @@ int main(int argc, char *argv[])
 			draw_rect_outline(rect_x0, rect_y0, hx, hy, camx, camy, w, h);
 		}
 		draw_hud(w, h, have_hover, hx, hy, brush, save_path, save_locked);
-		draw_palette(w, h, brush);
+		draw_palette(w, h, brush, area, &src_dd, src_hover);
 
 		if (shot_path) {
 			SDL_Surface *surf = SDL_RenderReadPixels(sdlren, NULL);
