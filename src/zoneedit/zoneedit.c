@@ -35,8 +35,17 @@
  *                  (sx,sy) here and the matching return door at (dx,dy) in
  *                  destarea. This is how you hang a new test area off an
  *                  existing one (e.g. a door in Aston to a fresh zone).
- *     --allow-live edit an existing zone in place instead of read-only; every
+ *     --claim      mark a zone as yours to edit: `zoneedit <area>` then saves
+ *     --unclaim    it in place with F5, no flags. Zones you did not claim stay
+ *                  read-only, so unlocking your test map cannot unlock a
+ *                  shipped one. --new-area claims the area it creates.
+ *     --allow-live one-off in-place edit of an UNCLAIMED (shipped) zone; every
  *                  overwrite takes a timestamped backup first.
+ *
+ * Note --out= writes a second .map. Never aim it inside a live zone folder: the
+ * server loads EVERY .map in a zone dir, in unspecified readdir order, and a
+ * `field=` block clears the tile first -- so two maps covering the same tile
+ * clobber each other nondeterministically. Claim the zone instead.
  *
  * Warps are pure content: the server's teleport_driver already crosses areas,
  * so linking maps needs no server code change.
@@ -301,6 +310,7 @@ static unsigned int *g_place_sprite = NULL; /* per-cell resolved placement sprit
 static unsigned char *g_char_here = NULL; /* per-cell: an NPC placement sits here */
 static int g_show_flags = 0; /* overlay move-blocked tiles         */
 static int g_live_edit = 0; /* --allow-live: edit zones in place  */
+static int g_zone_claimed = 0; /* zone has an EDITABLE marker        */
 
 static inline size_t cellof(int x, int y)
 {
@@ -568,6 +578,96 @@ static int add_warp(
 static int file_exists(const char *path); /* defined below */
 static int backup_once(const char *path); /* defined below */
 
+/* ---------------------------------------------------------- zone ownership --
+ * A zone folder holding an EDITABLE marker is one you created for your own use,
+ * so the editor saves it in place with no extra flag. Shipped zones have no
+ * marker and stay read-only unless --allow-live is passed deliberately. This
+ * makes "safe to edit" a property of the zone rather than a global switch, so
+ * unlocking your test map cannot also unlock a shipped one.
+ *
+ * The marker has no file extension, and the server's zone loader matches on a
+ * .map/.chr/.itm suffix (create.c endcmp), so it is ignored at load time. */
+#define ZONE_MARKER "EDITABLE"
+
+static void zone_marker_path(char *out, size_t outlen, const char *zones_root, int area)
+{
+	snprintf(out, outlen, "%s/%d/%s", zones_root, area, ZONE_MARKER);
+}
+
+static int zone_is_editable(const char *zones_root, int area)
+{
+	char p[1024];
+	zone_marker_path(p, sizeof(p), zones_root, area);
+	return file_exists(p);
+}
+
+/* Count content files in a zone, so claiming a zone full of shipped content
+ * looks obviously different from claiming a fresh test area. */
+static int zone_content_files(const char *zones_root, int area)
+{
+	char dir[1024];
+	snprintf(dir, sizeof(dir), "%s/%d", zones_root, area);
+	DIR *d = opendir(dir);
+	if (!d) {
+		return -1;
+	}
+	struct dirent *de;
+	int n = 0;
+	while ((de = readdir(d))) {
+		const char *e = strrchr(de->d_name, '.');
+		if (e && (!strcasecmp(e, ".map") || !strcasecmp(e, ".chr") || !strcasecmp(e, ".itm"))) {
+			n++;
+		}
+	}
+	closedir(d);
+	return n;
+}
+
+/* --claim / --unclaim: mark a zone as yours to edit, or hand it back. Done
+ * through the tool so the marker's name and location stay an implementation
+ * detail. Returns 0 on success. */
+static int zone_claim(const char *zones_root, int area, int claim)
+{
+	char p[1024];
+	zone_marker_path(p, sizeof(p), zones_root, area);
+
+	if (!claim) {
+		remove(p);
+		if (file_exists(p)) {
+			fprintf(stderr, "zoneedit: could not remove %s\n", p);
+			return 1;
+		}
+		printf("Area %d is READ-ONLY again (claim released).\n", area);
+		return 0;
+	}
+
+	int files = zone_content_files(zones_root, area);
+	if (files < 0) {
+		fprintf(stderr, "zoneedit: no zone folder for area %d under %s\n", area, zones_root);
+		return 1;
+	}
+
+	FILE *f = fopen(p, "wb");
+	if (!f) {
+		fprintf(stderr, "zoneedit: cannot create %s\n", p);
+		return 1;
+	}
+	fprintf(f,
+	    "This zone is claimed for editing: zoneedit may save it in place.\n"
+	    "Delete this file (or run: zoneedit --unclaim=%d) to make it read-only again.\n",
+	    area);
+	fclose(f);
+
+	printf("Area %d is now EDITABLE - `zoneedit %d` saves with F5, no flags needed.\n", area, area);
+	if (files > 3) {
+		printf("\n  NOTE: this zone holds %d content files, so it looks like authored\n"
+		       "  content rather than a fresh test area. If you did not mean to claim a\n"
+		       "  shipped zone, run: zoneedit --unclaim=%d\n",
+		    files, area);
+	}
+	return 0;
+}
+
 /* Write the return half of a link: a door at (dx,dy) in `destarea` that warps
  * back to (srcx,srcy) in `srcarea`. The destination zone is not the one loaded
  * in the editor, so it is edited headlessly through zoneio -- load its .map,
@@ -692,9 +792,14 @@ static int create_new_area(const char *zones_root, int n, const char *name)
 		fclose(f);
 	}
 
+	/* A zone you just scaffolded is yours by definition, so claim it now -- the
+	 * whole point is to have somewhere you can paint and save freely. */
+	zone_claim(zones_root, n, 1);
+
 	printf("Created area %d:\n", n);
 	printf("  map: %s (16x16 grass field at 120,120)\n", mapp);
 	printf("  sql: %s\n", sqlp);
+	printf("  editable: yes (claimed - `zoneedit %d` saves with F5)\n", n);
 	printf("Steps to bring it online:\n");
 	printf("  1. run the SQL:  docker exec astonia3-db mysql -uroot -pastonia merc < %s\n", sqlp);
 	printf("  2. ensure zones/%d has no OFFLINE marker; restart the container.\n", n);
@@ -1128,7 +1233,9 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 	snprintf(line, sizeof line, "zoneedit   %s", shown);
 	render_text(8, 6, IRGB(31, 31, 31), 0, line);
 	if (locked) {
-		render_text(w - 380, 6, IRGB(31, 20, 8), 0, "READ-ONLY (--out=NEW.map, or --allow-live to edit in place)");
+		render_text(w - 330, 6, IRGB(31, 20, 8), 0, "READ-ONLY (run: zoneedit --claim=<area> to edit)");
+	} else if (g_zone_claimed) {
+		render_text(w - 230, 6, IRGB(12, 31, 12), 0, "EDITABLE - your zone, F5 saves");
 	} else if (g_live_edit) {
 		render_text(w - 300, 6, IRGB(31, 12, 12), 0, "LIVE EDIT - saves overwrite this zone (backed up)");
 	}
@@ -1168,6 +1275,7 @@ int main(int argc, char *argv[])
 	char place_n[64][ZIO_NAMELEN];
 	int nplace = 0;
 	int new_area = 0;
+	int claim_area = 0, unclaim_area = 0;
 	const char *area_name = NULL;
 
 	/* Scripted warps: place a teleport door at (sx,sy) -> area (dx,dy). */
@@ -1232,6 +1340,10 @@ int main(int argc, char *argv[])
 			} else {
 				fprintf(stderr, "zoneedit: bad --link (want sx,sy,destarea,dx,dy[,sprite])\n");
 			}
+		} else if (!strncmp(argv[i], "--claim=", 8)) {
+			claim_area = atoi(argv[i] + 8);
+		} else if (!strncmp(argv[i], "--unclaim=", 10)) {
+			unclaim_area = atoi(argv[i] + 10);
 		} else if (!strncmp(argv[i], "--new-area=", 11)) {
 			new_area = atoi(argv[i] + 11);
 		} else if (!strncmp(argv[i], "--area-name=", 12)) {
@@ -1245,8 +1357,15 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* New-area wizard: scaffold zones/<N>/ and emit the mandatory area-row SQL,
-	 * then exit (no rendering needed). */
+	/* Bookkeeping commands: do the thing and exit (no rendering needed). */
+	if (claim_area > 0) {
+		return zone_claim(zones_root, claim_area, 1);
+	}
+	if (unclaim_area > 0) {
+		return zone_claim(zones_root, unclaim_area, 0);
+	}
+
+	/* New-area wizard: scaffold zones/<N>/ and emit the mandatory area-row SQL. */
 	if (new_area > 0) {
 		return create_new_area(zones_root, new_area, area_name);
 	}
@@ -1341,12 +1460,16 @@ int main(int argc, char *argv[])
 	 * warp pass below so a door is never half-applied -- template written to
 	 * disk but placement dropped by a blocked save. */
 	const char *save_path = out_path ? out_path : mapfile;
-	int save_locked = file_exists(save_path) && !g_live_edit;
+	g_zone_claimed = zone_is_editable(zones_root, area);
+	int save_locked = file_exists(save_path) && !g_live_edit && !g_zone_claimed;
 	if (save_locked) {
 		fprintf(stderr,
-		    "zoneedit: %s already exists -> READ-ONLY (saving disabled). Pass --out=NEW.map to write a copy, or "
-		    "--allow-live to edit it in place.\n",
-		    save_path);
+		    "zoneedit: %s already exists -> READ-ONLY (saving disabled).\n"
+		    "  This zone is not claimed for editing. To make area %d yours to edit:  zoneedit --claim=%d\n"
+		    "  (or --allow-live for a one-off in-place edit of a shipped zone.)\n",
+		    save_path, area, area);
+	} else if (g_zone_claimed) {
+		fprintf(stderr, "zoneedit: area %d is claimed for editing - F5 saves in place (backup written first)\n", area);
 	} else if (g_live_edit && file_exists(save_path)) {
 		fprintf(stderr, "zoneedit: LIVE EDIT enabled - saves overwrite %s (a backup is written first)\n", save_path);
 	}
@@ -1375,8 +1498,11 @@ int main(int argc, char *argv[])
 		add_warp(zonedir, link_sx[i], link_sy[i], link_a[i], link_dx[i], link_dy[i], link_sp[i], 1);
 	}
 
-	/* Save the (edited) map if requested (blocked when the target is locked). */
-	if ((out_path || nlink) && !save_locked) {
+	/* Save the (edited) map if requested (blocked when the target is locked).
+	 * A claimed zone also saves its scripted edits in place -- otherwise the only
+	 * batch route would be --out, which must never point inside a zone folder. */
+	int batch_edits = nset + nflag + nplace + nwarp + nlink;
+	if ((out_path || nlink || (g_zone_claimed && batch_edits)) && !save_locked) {
 		if (save_map(&g_map, save_path) == 0) {
 			fprintf(stderr, "zoneedit: wrote map %s\n", save_path);
 		} else {
@@ -1443,9 +1569,9 @@ int main(int argc, char *argv[])
 				} else if (e.key.key == SDLK_F5) {
 					if (save_locked) {
 						fprintf(stderr,
-						    "zoneedit: save blocked - %s is a pre-existing file. Relaunch with --out=NEW.map to save a "
-						    "copy, or --allow-live to edit it in place.\n",
-						    save_path);
+						    "zoneedit: save blocked - this zone is not claimed for editing. Run `zoneedit --claim=%d` "
+						    "to make it yours, or relaunch with --allow-live for a one-off in-place edit.\n",
+						    area);
 					} else if (save_map(&g_map, save_path) == 0) {
 						fprintf(stderr, "zoneedit: saved %s\n", save_path);
 					}
