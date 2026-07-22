@@ -16,7 +16,8 @@
  * loader finds res/gxN.zip.
  *
  * Interactive: WASD/arrows pan; left-click paints the brush; right-click erases;
- * middle-click eyedrops the brush; F5 saves; F11 toggles borderless/windowed.
+ * middle-click eyedrops the brush; the wheel zooms over the map (and scrolls the
+ * palette over the palette); F5 saves; F11 toggles borderless/windowed.
  *
  * It opens borderless over the whole display and uses all of it as canvas -- see
  * apply_layout(), which departs from the client's fixed centered 800x650.
@@ -48,6 +49,7 @@
  *     --windowed   start in a bordered window instead of borderless fullscreen
  *                  (implied by --shot, so screenshots stay a fixed size).
  *     --borderless force borderless even for a --shot run.
+ *     --zoom       start at this zoom percentage: 50, 100, 150 or 200.
  *
  * Note --out= writes a second .map. Never aim it inside a live zone folder: the
  * server loads EVERY .map in a zone dir, in unspecified readdir order, and a
@@ -144,7 +146,53 @@ static void reset_clip(void)
 #define NORMAL_LIGHT        15
 #define FDX                 40 /* map tile width  (client astonia.h) */
 #define FDY                 20 /* map tile height (client astonia.h) */
-#define MAXMAP              ZIO_MAXMAP
+
+/* ------------------------------------------------------------------- zoom --
+ * Zoom is a percentage applied to both the projection (tile size) and every
+ * sprite (RenderFX.scale, which the renderer also applies to the sprite's
+ * anchor offsets -- sdl_image.c:804 -- so placements stay aligned).
+ *
+ * The steps are deliberately discrete and coarse. RenderFX.scale is part of the
+ * texture cache key (sdl_texture.c:389), so each distinct zoom re-renders every
+ * visible sprite into the cache; a continuous zoom would thrash it. They are
+ * also all multiples of 50%, which is what keeps the half-tile dimensions whole
+ * numbers (20,10 at 100%) -- a fractional half-tile would put the drawn grid and
+ * the pick_tile inverse slightly out of step. */
+static const int zoom_steps[] = {50, 100, 150, 200};
+static int g_zoom = 100; /* percent; always one of zoom_steps */
+
+/* Half-tile dimensions at the current zoom: the projection's basic unit. */
+static int hdx(void)
+{
+	return FDX / 2 * g_zoom / 100;
+}
+
+static int hdy(void)
+{
+	return FDY / 2 * g_zoom / 100;
+}
+
+/* Move `dir` steps along zoom_steps, clamping at both ends. */
+static void zoom_step(int dir)
+{
+	int n = (int)(sizeof zoom_steps / sizeof zoom_steps[0]), i;
+
+	for (i = 0; i < n; i++) {
+		if (zoom_steps[i] == g_zoom) {
+			break;
+		}
+	}
+	i += dir;
+	if (i < 0) {
+		i = 0;
+	}
+	if (i >= n) {
+		i = n - 1;
+	}
+	g_zoom = zoom_steps[i];
+}
+
+#define MAXMAP ZIO_MAXMAP
 
 /* ------------------------------------------------ template name -> sprite -- */
 /* Placements reference char/item templates by name; we resolve those to sprite
@@ -272,7 +320,9 @@ static tick_t g_anim_tick = 0;
  * mn is the map cell index, used only to desync position-cycle animations
  * between neighboring tiles.
  */
-static void draw_map_sprite(unsigned int sprite, size_t mn, int scrx, int scry, char align)
+/* `zoom` is a percentage folded into the sprite's own scale. The map passes the
+ * current zoom; the palette passes 100, so thumbnails keep a fixed size. */
+static void draw_map_sprite(unsigned int sprite, size_t mn, int scrx, int scry, char align, int zoom)
 {
 	unsigned char scale, cr, cg, cb, light, sat;
 	unsigned short c1, c2, c3, shine;
@@ -313,7 +363,10 @@ static void draw_map_sprite(unsigned int sprite, size_t mn, int scrx, int scry, 
 	fx.align = align;
 	fx.light = NORMAL_LIGHT;
 	fx.ml = fx.ll = fx.rl = fx.ul = fx.dl = NORMAL_LIGHT;
-	fx.scale = scale ? scale : 100;
+	/* Some sprites already arrive with a variant scale of their own, so zoom
+	 * multiplies into it rather than replacing it. RenderFX.scale is a byte. */
+	int s = (scale ? scale : 100) * zoom / 100;
+	fx.scale = (unsigned char)(s < 1 ? 1 : (s > 255 ? 255 : s));
 	fx.cr = (char)cr;
 	fx.cg = (char)cg;
 	fx.cb = (char)cb;
@@ -348,11 +401,13 @@ static void draw_zone(double camx, double camy, int w, int h)
 	int icamx = (int)camx, icamy = (int)camy;
 
 	/* Window of tiles that can fall on screen. Inverting the projection, a tile
-	 * is on screen while |dx-dy| <= w/(2*FDX/2) and |dx+dy| <= h/(2*FDY/2), so
-	 * neither coordinate can stray further than half their sum; the margin on top
-	 * covers walls tall enough to reach in from off screen. This has to scale
-	 * with the canvas -- a fixed reach silently stops filling a wider window. */
-	int reach = (w / FDX + h / FDY) / 2 + 12;
+	 * is on screen while |dx-dy| <= (w/2)/hdx and |dx+dy| <= (h/2)/hdy, so neither
+	 * coordinate can stray further than half their sum; the margin on top covers
+	 * walls tall enough to reach in from off screen. This has to scale with both
+	 * the canvas and the zoom -- a fixed reach silently stops filling the window
+	 * as either grows. (A wall's height in *tiles* is zoom-independent, since the
+	 * sprite and hdy scale together, so the margin stays constant.) */
+	int reach = (w / hdx() + h / hdy()) / 4 + 12;
 	int x0 = icamx - reach, x1 = icamx + reach;
 	int y0 = icamy - reach, y1 = icamy + reach;
 	if (x0 < 0) {
@@ -376,10 +431,13 @@ static void draw_zone(double camx, double camy, int w, int h)
 			size_t c = cellof(mx, my);
 
 			int dx = mx - icamx, dy = my - icamy;
-			int sx = (dx - dy) * (FDX / 2) + cx;
-			int sy = (dx + dy) * (FDY / 2) + cy - FDY / 2;
+			int sx = (dx - dy) * hdx() + cx;
+			int sy = (dx + dy) * hdy() + cy - hdy();
 
-			if (sx < -FDX * 2 || sx > w + FDX * 2 || sy < -200 || sy > h + FDY * 2) {
+			/* Off-screen cull. The generous top margin lets a tall wall drawn from
+			 * an off-screen tile still reach down into view, so it scales with the
+			 * zoom the same way the sprite does. */
+			if (sx < -hdx() * 4 || sx > w + hdx() * 4 || sy < -200 * g_zoom / 100 || sy > h + hdy() * 4) {
 				continue;
 			}
 
@@ -387,11 +445,11 @@ static void draw_zone(double camx, double camy, int w, int h)
 			 * (low = primary, high = secondary overlay); the client renders both
 			 * (protocol.c: gsprite/gsprite2). Mirror that here. */
 			unsigned int g = g_map.gsprite[c], f = g_map.fsprite[c];
-			draw_map_sprite(g & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET);
-			draw_map_sprite(g >> 16, c, sx, sy, RENDER_ALIGN_OFFSET);
-			draw_map_sprite(f & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET);
-			draw_map_sprite(f >> 16, c, sx, sy, RENDER_ALIGN_OFFSET);
-			draw_map_sprite(g_place_sprite[c], c, sx, sy, RENDER_ALIGN_OFFSET);
+			draw_map_sprite(g & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET, g_zoom);
+			draw_map_sprite(g >> 16, c, sx, sy, RENDER_ALIGN_OFFSET, g_zoom);
+			draw_map_sprite(f & 0xFFFF, c, sx, sy, RENDER_ALIGN_OFFSET, g_zoom);
+			draw_map_sprite(f >> 16, c, sx, sy, RENDER_ALIGN_OFFSET, g_zoom);
+			draw_map_sprite(g_place_sprite[c], c, sx, sy, RENDER_ALIGN_OFFSET, g_zoom);
 
 			/* Flag overlay: outline move-blocked tiles in red. A tile an NPC
 			 * stands on is blocked in-game too (the server raises MF_TMOVEBLOCK
@@ -400,10 +458,10 @@ static void draw_zone(double camx, double camy, int w, int h)
 			 * runtime-only flag into the file on save. */
 			if (g_show_flags && ((g_map.flags[c] & (1u << 0)) || g_char_here[c])) { /* MF_MOVEBLOCK */
 				unsigned short red = 0xF800;
-				render_line(sx - FDX / 2, sy, sx, sy - FDY / 2, red);
-				render_line(sx, sy - FDY / 2, sx + FDX / 2, sy, red);
-				render_line(sx + FDX / 2, sy, sx, sy + FDY / 2, red);
-				render_line(sx, sy + FDY / 2, sx - FDX / 2, sy, red);
+				render_line(sx - hdx(), sy, sx, sy - hdy(), red);
+				render_line(sx, sy - hdy(), sx + hdx(), sy, red);
+				render_line(sx + hdx(), sy, sx, sy + hdy(), red);
+				render_line(sx, sy + hdy(), sx - hdx(), sy, red);
 			}
 		}
 	}
@@ -833,20 +891,32 @@ static int create_new_area(const char *zones_root, int n, const char *name)
 	return 0;
 }
 
-/* Convert a window-space mouse position to a map tile (inverse of the draw
- * projection). Returns 1 and fills *tx,*ty when the tile is in range. */
-static int pick_tile(int mouse_x, int mouse_y, double camx, double camy, int w, int h, int *tx, int *ty)
+/* Convert a window-space mouse position to fractional map coordinates (the exact
+ * inverse of the draw projection). Kept separate from pick_tile because zooming
+ * about the cursor needs the un-rounded position. */
+static void pick_tile_frac(int mouse_x, int mouse_y, double camx, double camy, int w, int h, double *fx, double *fy)
 {
 	/* window -> logical draw space */
 	double lx = (mouse_x - x_offset), ly = (mouse_y - y_offset);
-	double cx = w / 2.0, cy = h / 2.0 - FDY / 2.0;
+	double cx = w / 2.0, cy = h / 2.0 - hdy();
 
-	double u = (lx - cx) / (FDX / 2.0); /* = dx - dy */
-	double v = (ly - cy) / (FDY / 2.0); /* = dx + dy */
-	double dx = (u + v) / 2.0, dy = (v - u) / 2.0;
+	double u = (lx - cx) / hdx(); /* = dx - dy */
+	double v = (ly - cy) / hdy(); /* = dx + dy */
 
-	int mx = (int)floor(camx + dx + 0.5);
-	int my = (int)floor(camy + dy + 0.5);
+	*fx = camx + (u + v) / 2.0;
+	*fy = camy + (v - u) / 2.0;
+}
+
+/* Convert a window-space mouse position to a map tile. Returns 1 and fills
+ * *tx,*ty when the tile is in range. */
+static int pick_tile(int mouse_x, int mouse_y, double camx, double camy, int w, int h, int *tx, int *ty)
+{
+	double fx, fy;
+
+	pick_tile_frac(mouse_x, mouse_y, camx, camy, w, h, &fx, &fy);
+
+	int mx = (int)floor(fx + 0.5);
+	int my = (int)floor(fy + 0.5);
 	if (mx < 0 || my < 0 || mx >= MAXMAP || my >= MAXMAP) {
 		return 0;
 	}
@@ -860,14 +930,14 @@ static void draw_highlight(int mx, int my, double camx, double camy, int w, int 
 {
 	int cx = w / 2, cy = h / 2;
 	int dx = mx - (int)camx, dy = my - (int)camy;
-	int sx = (dx - dy) * (FDX / 2) + cx;
-	int sy = (dx + dy) * (FDY / 2) + cy - FDY / 2;
+	int sx = (dx - dy) * hdx() + cx;
+	int sy = (dx + dy) * hdy() + cy - hdy();
 	unsigned short col = 0xFFE0; /* yellow (RGB565) */
-	/* tile diamond: half-width FDX/2, half-height FDY/2, centered on the tile */
-	render_line(sx - FDX / 2, sy, sx, sy - FDY / 2, col);
-	render_line(sx, sy - FDY / 2, sx + FDX / 2, sy, col);
-	render_line(sx + FDX / 2, sy, sx, sy + FDY / 2, col);
-	render_line(sx, sy + FDY / 2, sx - FDX / 2, sy, col);
+	/* tile diamond: half-width hdx(), half-height hdy(), centered on the tile */
+	render_line(sx - hdx(), sy, sx, sy - hdy(), col);
+	render_line(sx, sy - hdy(), sx + hdx(), sy, col);
+	render_line(sx + hdx(), sy, sx, sy + hdy(), col);
+	render_line(sx, sy + hdy(), sx - hdx(), sy, col);
 }
 
 /* -------------------------------------------------------------- paint tools --
@@ -1010,8 +1080,8 @@ static void draw_rect_outline(int x0, int y0, int x1, int y1, double camx, doubl
 	int px[4], py[4], i;
 	for (i = 0; i < 4; i++) {
 		int dx = cor[i][0] - (int)camx, dy = cor[i][1] - (int)camy;
-		px[i] = (dx - dy) * (FDX / 2) + cx;
-		py[i] = (dx + dy) * (FDY / 2) + cy - FDY / 2;
+		px[i] = (dx - dy) * hdx() + cx;
+		py[i] = (dx + dy) * hdy() + cy - hdy();
 	}
 	unsigned short col = 0x07FF; /* cyan (RGB565) */
 	for (i = 0; i < 4; i++) {
@@ -1356,8 +1426,10 @@ static void draw_palette(int w, int h, brush_t brush)
 		render_set_clip(cx0, cy0, cx1, cy1);
 		unsigned int g = g_pal[g_pal_tab][idx].sprite;
 		int mx = (cx0 + cx1) / 2, my = (cy0 + cy1) / 2;
-		draw_map_sprite(g & 0xFFFF, (size_t)idx, mx, my, RENDER_ALIGN_CENTER);
-		draw_map_sprite(g >> 16, (size_t)idx, mx, my, RENDER_ALIGN_CENTER);
+		/* Zoom 100: thumbnails are a fixed-size index of the brushes, so they
+		 * must not follow the map's zoom -- the cells they sit in don't. */
+		draw_map_sprite(g & 0xFFFF, (size_t)idx, mx, my, RENDER_ALIGN_CENTER, 100);
+		draw_map_sprite(g >> 16, (size_t)idx, mx, my, RENDER_ALIGN_CENTER, 100);
 		render_set_clip(0, 0, w, h);
 
 		if (g == brush.sprite && g_pal_tab == brush.layer) { /* selected outline */
@@ -1397,7 +1469,9 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 			shown = slash;
 		}
 	}
-	snprintf(line, sizeof line, "zoneedit   %s", shown);
+	/* Zoom lives up here rather than in the status bar: at the narrow windowed
+	 * canvas the bottom bar has no room left beside the help text. */
+	snprintf(line, sizeof line, "zoneedit   %s   zoom %d%%", shown, g_zoom);
 	render_text(8, 6, IRGB(31, 31, 31), 0, line);
 	if (locked) {
 		render_text(w - 330, 6, IRGB(31, 20, 8), 0, "READ-ONLY (run: zoneedit --claim=<area> to edit)");
@@ -1416,8 +1490,10 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 		snprintf(line, sizeof line, "brush %u (%s)   (hover a tile)", brush.sprite, layer);
 	}
 	render_text(8, h - 16, IRGB(24, 31, 24), 0, line);
-	render_text(w - 560, h - 16, IRGB(24, 24, 31), 0,
-	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  F11 window  F5 save  ESC quit");
+	render_text(w - 640, h - 16, IRGB(24, 24, 31), 0,
+	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  WHEEL zoom  F11 window  F5 save "
+	    " "
+	    "ESC quit");
 }
 
 /* Window layout.
@@ -1521,6 +1597,16 @@ int main(int argc, char *argv[])
 			max_frames = atoi(argv[i] + 9);
 		} else if (!strncmp(argv[i], "--shot=", 7)) {
 			shot_path = argv[i] + 7;
+		} else if (!strncmp(argv[i], "--zoom=", 7)) {
+			int z = atoi(argv[i] + 7), n = (int)(sizeof zoom_steps / sizeof zoom_steps[0]), j;
+			for (j = 0; j < n && zoom_steps[j] != z; j++) {
+				;
+			}
+			if (j < n) {
+				g_zoom = z;
+			} else {
+				fprintf(stderr, "zoneedit: --zoom must be 50, 100, 150 or 200 (got %d), keeping %d\n", z, g_zoom);
+			}
 		} else if (!strcmp(argv[i], "--windowed")) {
 			g_borderless = 0;
 			window_mode_set = 1;
@@ -1857,11 +1943,33 @@ int main(int argc, char *argv[])
 					SDL_SetWindowFullscreen(sdlwnd, g_borderless);
 					SDL_SyncWindow(sdlwnd);
 					apply_layout(&w, &h);
+				} else if (e.key.key == SDLK_EQUALS || e.key.key == SDLK_KP_PLUS) {
+					zoom_step(1); /* keyboard zoom holds the center, not the cursor */
+				} else if (e.key.key == SDLK_MINUS || e.key.key == SDLK_KP_MINUS) {
+					zoom_step(-1);
 				}
 			} else if (e.type == SDL_EVENT_WINDOW_RESIZED || e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
 				apply_layout(&w, &h);
 			} else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-				palette_scroll(-(int)e.wheel.y, w, h);
+				/* Over the palette the wheel still scrolls it; over the map it
+				 * zooms. palette_pick returns -2 for "outside the panel". */
+				if (palette_pick((int)mfx, (int)mfy, w, h) != -2) {
+					palette_scroll(-(int)e.wheel.y, w, h);
+				} else {
+					/* Zoom about the cursor: find the map position under the
+					 * pointer, change zoom, then shift the camera by however much
+					 * that same pixel now resolves to, so the tile you are pointing
+					 * at stays put instead of drifting toward the center. */
+					double ax, ay, bx, by;
+					pick_tile_frac((int)mfx, (int)mfy, camx, camy, w, h, &ax, &ay);
+					zoom_step((int)e.wheel.y);
+					pick_tile_frac((int)mfx, (int)mfy, camx, camy, w, h, &bx, &by);
+
+					/* Snap back to whole tiles: draw_zone works off an integer
+					 * camera, so a fractional one would just be truncated away. */
+					camx = floor(camx + (ax - bx) + 0.5);
+					camy = floor(camy + (ay - by) + 0.5);
+				}
 			} else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
 				int pk = palette_pick((int)e.button.x, (int)e.button.y, w, h);
 				if (pk == PAL_TAB0 || pk == PAL_TAB1) {
