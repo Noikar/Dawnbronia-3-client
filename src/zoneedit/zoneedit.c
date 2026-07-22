@@ -16,13 +16,17 @@
  * loader finds res/gxN.zip.
  *
  * Interactive: WASD/arrows pan; left-click paints the brush; right-click erases;
- * middle-click eyedrops the brush; F5 saves.
+ * middle-click eyedrops the brush; F5 saves; F11 toggles borderless/windowed.
+ *
+ * It opens borderless over the whole display and uses all of it as canvas -- see
+ * apply_layout(), which departs from the client's fixed centered 800x650.
  *
  * Usage:
  *   zoneedit [<area>] [--zones=<dir>] [--mapfile=<f>] [--frames=<n>]
  *            [--shot=<file.bmp>] [--set=<x,y,gsprite>]... [--out=<file.map>]
  *            [--highlight=<x,y>] [--warp=<sx,sy,area,dx,dy[,sprite]>]...
  *            [--link=<sx,sy,destarea,dx,dy[,sprite]>]... [--allow-live]
+ *            [--windowed | --borderless]
  *     <area>       numeric zone id (default 1)
  *     --zones      zones root dir (default ../astonia_community_server3/zones)
  *     --mapfile    load this .map directly instead of the zone's
@@ -41,6 +45,9 @@
  *                  shipped one. --new-area claims the area it creates.
  *     --allow-live one-off in-place edit of an UNCLAIMED (shipped) zone; every
  *                  overwrite takes a timestamped backup first.
+ *     --windowed   start in a bordered window instead of borderless fullscreen
+ *                  (implied by --shot, so screenshots stay a fixed size).
+ *     --borderless force borderless even for a --shot run.
  *
  * Note --out= writes a second .map. Never aim it inside a live zone folder: the
  * server loads EVERY .map in a zone dir, in unspecified readdir order, and a
@@ -101,7 +108,6 @@ extern int sdl_init(int width, int height, char *title, int monitor);
 extern void sdl_exit(void);
 extern int sdl_clear(void);
 extern int sdl_render(void);
-extern void render_clear_clip(void);
 extern void render_get_clip(int *sx, int *sy, int *ex, int *ey);
 extern void render_sprite(unsigned int sprite, int scrx, int scry, char light, char align);
 extern void render_line(int fx, int fy, int tx, int ty, unsigned short col);
@@ -109,13 +115,29 @@ extern void render_create_font(void); /* builds the shaded/framed fonts from fon
 extern int render_text(int sx, int sy, unsigned short color, int flags, const char *text);
 extern void render_rect_alpha(int sx, int sy, int ex, int ey, unsigned short color, unsigned char alpha);
 extern void render_set_clip(int sx, int sy, int ex, int ey);
+extern void render_set_offset(int x, int y);
 extern int sdl_multi;
+extern int sdl_scale; /* window pixels per logical pixel          */
+extern int sdl_scale_pin; /* pins the above; see sdl_core.c          */
+extern int __yres; /* logical canvas height (client YRES)     */
 
 /* 5-5-5 color, components 0..31 (matches the client's game.h IRGB). */
 #define IRGB(r, g, b) (((r) << 10) | ((g) << 5) | ((b) << 0))
 extern int sdl_cache_size;
 extern int x_offset, y_offset; /* logical->window centering offset (render.c) */
 extern SDL_Renderer *sdlren;
+extern SDL_Window *sdlwnd;
+
+/* Logical canvas size, kept in sync by apply_layout(). Anything that wants the
+ * clip rect back to "the whole canvas" must use reset_clip(), NOT the client's
+ * render_clear_clip(): that one restores a fixed 800-wide XRES canvas, which is
+ * the game's layout and not ours. */
+static int g_view_w = 800, g_view_h = 650;
+
+static void reset_clip(void)
+{
+	render_set_clip(0, 0, g_view_w, g_view_h);
+}
 
 #define RENDER_ALIGN_OFFSET 0
 #define RENDER_ALIGN_CENTER 1
@@ -325,8 +347,12 @@ static void draw_zone(double camx, double camy, int w, int h)
 	int cx = w / 2, cy = h / 2;
 	int icamx = (int)camx, icamy = (int)camy;
 
-	/* Window of tiles that can fall on screen (generous margin for tall walls). */
-	int reach = 40;
+	/* Window of tiles that can fall on screen. Inverting the projection, a tile
+	 * is on screen while |dx-dy| <= w/(2*FDX/2) and |dx+dy| <= h/(2*FDY/2), so
+	 * neither coordinate can stray further than half their sum; the margin on top
+	 * covers walls tall enough to reach in from off screen. This has to scale
+	 * with the canvas -- a fixed reach silently stops filling a wider window. */
+	int reach = (w / FDX + h / FDY) / 2 + 12;
 	int x0 = icamx - reach, x1 = icamx + reach;
 	int y0 = icamy - reach, y1 = icamy + reach;
 	if (x0 < 0) {
@@ -1342,7 +1368,7 @@ static void draw_palette(int w, int h, brush_t brush)
 			render_line(cx0, cy1, cx0, cy0, sel);
 		}
 	}
-	render_clear_clip();
+	reset_clip();
 }
 
 /* Overlay bars: a title strip up top and a status/help strip along the bottom.
@@ -1391,7 +1417,52 @@ static void draw_hud(int w, int h, int have_hover, int hx, int hy, brush_t brush
 	}
 	render_text(8, h - 16, IRGB(24, 31, 24), 0, line);
 	render_text(w - 560, h - 16, IRGB(24, 24, 31), 0,
-	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  F5 save  ESC quit");
+	    "drag paint  RMB erase  SHIFT+drag rect  CTRL+click fill  MMB pick  TAB layer  F11 window  F5 save  ESC quit");
+}
+
+/* Window layout.
+ *
+ * The client centers a fixed 800 x YRES canvas inside the window and letterboxes
+ * whatever is left over, because its HUD is built to that exact size. For an
+ * editor those bars are just wasted desk space, so zoneedit instead claims the
+ * entire window: logical size = window pixels / sdl_scale, no centering offset,
+ * no height cap. Bigger display simply means more map on screen.
+ *
+ * VIEW_SCALE (window pixels per logical pixel) is what trades sprite size
+ * against map area -- 2 keeps sprites and HUD text comfortably legible while
+ * still showing more of the map than the old 800x650 canvas did. It is pinned
+ * before sdl_init because it also selects which res/gxN.zip is opened.
+ *
+ * WIN_W/WIN_H is the bordered-window size used by --windowed and by F11; at
+ * VIEW_SCALE 2 it works out to the same 800x650 logical canvas the tool used
+ * before, which keeps --shot screenshots comparable with earlier ones. */
+#define VIEW_SCALE 2
+#define WIN_W      1600
+#define WIN_H      1300
+
+static int g_borderless = 1; /* filling the display (F11 toggles) */
+
+/* Re-derive the logical draw area from the current window size. Call after
+ * anything that can change that size: startup, F11, a user resize. */
+static void apply_layout(int *out_w, int *out_h)
+{
+	int px = 0, py = 0;
+
+	SDL_GetWindowSize(sdlwnd, &px, &py);
+	if (px <= 0 || py <= 0) { /* shouldn't happen; keep a sane canvas if it does */
+		px = WIN_W;
+		py = WIN_H;
+	}
+
+	g_view_w = px / sdl_scale;
+	g_view_h = py / sdl_scale;
+
+	__yres = g_view_h; /* lifts the client's YRES1 (650) height cap */
+	render_set_offset(0, 0); /* no letterbox: the window IS the canvas   */
+	reset_clip();
+
+	*out_w = g_view_w;
+	*out_h = g_view_h;
 }
 
 int main(int argc, char *argv[])
@@ -1402,6 +1473,7 @@ int main(int argc, char *argv[])
 	const char *out_path = NULL; /* --out: write the (edited) map here     */
 	const char *mapfile_override = NULL; /* --mapfile: load this .map directly  */
 	int hl_x = -1, hl_y = -1; /* --highlight tile                        */
+	int window_mode_set = 0; /* --windowed/--borderless given explicitly */
 
 	/* Scripted edits (also drivable interactively): set gsprite at a tile. */
 	int set_x[64], set_y[64];
@@ -1449,6 +1521,12 @@ int main(int argc, char *argv[])
 			max_frames = atoi(argv[i] + 9);
 		} else if (!strncmp(argv[i], "--shot=", 7)) {
 			shot_path = argv[i] + 7;
+		} else if (!strcmp(argv[i], "--windowed")) {
+			g_borderless = 0;
+			window_mode_set = 1;
+		} else if (!strcmp(argv[i], "--borderless")) {
+			g_borderless = 1;
+			window_mode_set = 1;
 		} else if (!strncmp(argv[i], "--out=", 6)) {
 			out_path = argv[i] + 6;
 		} else if (!strncmp(argv[i], "--set=", 6)) {
@@ -1694,27 +1772,37 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* A headless screenshot run wants a fixed, reproducible canvas rather than
+	 * whatever this machine's display happens to be, so --shot implies --windowed
+	 * unless the window mode was asked for explicitly. */
+	if (shot_path && !window_mode_set) {
+		g_borderless = 0;
+	}
+
 	sdl_multi = 0;
 	sdl_cache_size = 8000;
-	if (!sdl_init(1280, 720, "Astonia zoneedit", 0)) {
+	sdl_scale_pin = VIEW_SCALE; /* must precede sdl_init: it picks res/gxN.zip */
+
+	/* Always create the window at the bordered size, then go fullscreen-desktop
+	 * separately. Letting sdl_init do the fullscreen (it does that when asked for
+	 * the display size) would leave SDL with no smaller size to restore on F11. */
+	if (!sdl_init(WIN_W, WIN_H, "Astonia zoneedit", 0)) {
 		fprintf(stderr, "zoneedit: sdl_init failed\n");
 		return 1;
 	}
-	render_clear_clip();
+	if (g_borderless) {
+		SDL_SetWindowFullscreenMode(sdlwnd, NULL); /* NULL = borderless desktop */
+		SDL_SetWindowFullscreen(sdlwnd, true);
+		SDL_SyncWindow(sdlwnd);
+	}
+
+	int w, h;
+	apply_layout(&w, &h);
 	render_create_font(); /* real client fonts (font.c) for the HUD/panels */
 
 	/* Loads the res/config JSON tables, including the animated-variant table that
 	 * maps virtual map sprite ids onto real archive sprites (see draw_map_sprite). */
 	sprite_config_init();
-
-	/* Use the client's logical draw area (what render_clear_clip just set) for
-	 * projection centering, not the physical window size. */
-	int csx, csy, w, h;
-	render_get_clip(&csx, &csy, &w, &h);
-	if (w <= 0 || h <= 0) {
-		w = 800;
-		h = 650;
-	}
 
 	/* Start on the highlighted tile when one was given -- asking to highlight a
 	 * tile means you want to look at it, and on a full-size zone the content
@@ -1764,7 +1852,14 @@ int main(int argc, char *argv[])
 					} else if (save_map(&g_map, save_path) == 0) {
 						fprintf(stderr, "zoneedit: saved %s\n", save_path);
 					}
+				} else if (e.key.key == SDLK_F11) {
+					g_borderless = !g_borderless;
+					SDL_SetWindowFullscreen(sdlwnd, g_borderless);
+					SDL_SyncWindow(sdlwnd);
+					apply_layout(&w, &h);
 				}
+			} else if (e.type == SDL_EVENT_WINDOW_RESIZED || e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+				apply_layout(&w, &h);
 			} else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
 				palette_scroll(-(int)e.wheel.y, w, h);
 			} else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
@@ -1861,7 +1956,7 @@ int main(int argc, char *argv[])
 		g_anim_tick = (tick_t)(SDL_GetTicks() * 24 / 1000);
 
 		sdl_clear();
-		render_clear_clip();
+		reset_clip();
 		draw_zone(camx, camy, w, h);
 		if (have_hover) {
 			draw_highlight(hx, hy, camx, camy, w, h);

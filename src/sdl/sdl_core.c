@@ -48,6 +48,13 @@ MIX_Track *sdl_tracks[MAX_SOUND_CHANNELS] = {NULL};
 
 // Scale and resolution settings
 DLL_EXPORT int sdl_scale = 1;
+// Optional caller-pinned scale factor; 0 means "derive one from the window
+// size". When set, sdl_init keeps this scale and hands the caller the whole
+// window as its logical draw area, skipping both the centered-letterbox layout
+// and the YRES1 height cap. The game leaves this at 0 because its HUD assumes a
+// fixed 800 x YRES canvas; the content tools set it, since an editor wants as
+// much legible canvas as the display can give.
+DLL_EXPORT int sdl_scale_pin = 0;
 DLL_EXPORT int sdl_frames = 0;
 DLL_EXPORT int sdl_multi = 4;
 DLL_EXPORT int sdl_cache_size = 8000;
@@ -339,7 +346,13 @@ int sdl_init(int width, int height, char *title, int monitor)
 #endif
 
 	// decide on screen format
-	if (width != XRES || height != YRES) {
+	if (sdl_scale_pin) {
+		// Pinned: the caller owns the whole window as its logical draw area, so
+		// there is nothing to center and no fixed-layout height to cap against.
+		sdl_scale = sdl_scale_pin;
+		YRES = height / sdl_scale;
+		render_set_offset(0, 0);
+	} else if (width != XRES || height != YRES) {
 		int tmp_scale = 1, off = 0;
 
 		// Check 4:3 aspect ratio (YRES0=600)

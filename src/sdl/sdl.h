@@ -41,6 +41,7 @@ typedef struct renderfont RenderFont;
 
 DLL_EXPORT extern int sdl_cache_size;
 DLL_EXPORT extern int sdl_scale;
+DLL_EXPORT extern int sdl_scale_pin;
 DLL_EXPORT extern int sdl_frames;
 DLL_EXPORT extern int sdl_multi;
 
