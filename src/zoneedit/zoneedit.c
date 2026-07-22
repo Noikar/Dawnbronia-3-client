@@ -917,6 +917,14 @@ static void win_to_logical(int wx, int wy, double *lx, double *ly)
 	*ly = (double)wy / sdl_scale - y_offset;
 }
 
+/* The forward direction, used by the self-tests to synthesize a click at a
+ * place the renderer would actually have drawn something. */
+static void logical_to_win(int lx, int ly, int *wx, int *wy)
+{
+	*wx = (lx + x_offset) * sdl_scale;
+	*wy = (ly + y_offset) * sdl_scale;
+}
+
 /* Convert a window-space mouse position to fractional map coordinates (the exact
  * inverse of the draw projection). Kept separate from pick_tile because zooming
  * about the cursor needs the un-rounded position. */
@@ -1829,6 +1837,123 @@ static void draw_palette(int w, int h, brush_t brush, int loaded_area, const dro
 	reset_clip();
 }
 
+/* Round-trip check on the widget hit tests.
+ *
+ * Every widget has two halves that must agree: the code that decides where to
+ * DRAW a thing, and the code that decides WHAT sits under a pixel. They are
+ * written separately, so they can drift apart -- and when they do, nothing
+ * renders wrong. The palette panel was drawn perfectly while being completely
+ * unclickable, because its hit test placed it somewhere else entirely; a
+ * screenshot cannot show that, and it took a user noticing.
+ *
+ * So walk every cell, tab and row through its own draw geometry, synthesize a
+ * click in the middle of it, and assert the pick agrees. Also check that a
+ * point out on the map is reported as outside every widget, which is what
+ * keeps clicks from being swallowed by a panel that is not there.
+ *
+ * Returns the number of failures. */
+static int selftest_widgets(int w, int h)
+{
+	int fails = 0, checks = 0;
+	int saved_tab = g_pal_tab;
+	int saved_scroll[2] = {g_pal_scroll[0], g_pal_scroll[1]};
+	static const int scroll_cases[] = {0, 3};
+
+	/* Palette cells, on both tabs and scrolled as well as unscrolled -- scroll
+	 * is applied independently by the draw and pick sides. */
+	for (int tab = 0; tab < 2; tab++) {
+		g_pal_tab = tab;
+		for (size_t s = 0; s < sizeof scroll_cases / sizeof scroll_cases[0]; s++) {
+			g_pal_scroll[tab] = scroll_cases[s];
+			for (int idx = 0; idx < g_pal_count[tab]; idx++) {
+				int cx0, cy0;
+				if (!palette_cell_rect(idx, w, h, &cx0, &cy0)) {
+					continue; /* scrolled out of view */
+				}
+				int wx, wy;
+				logical_to_win(cx0 + (PAL_CELL - 2) / 2, cy0 + (PAL_CELL - 2) / 2, &wx, &wy);
+				int got = palette_pick(wx, wy, w, h);
+				checks++;
+				if (got != idx) {
+					fprintf(stderr, "  FAIL cell tab %d scroll %d idx %d -> px %d,%d -> got %d\n", tab, scroll_cases[s],
+					    idx, wx, wy, got);
+					fails++;
+				}
+			}
+		}
+		g_pal_scroll[tab] = 0;
+	}
+
+	/* Tab strip. */
+	for (int tab = 0; tab < 2; tab++) {
+		int tx0, ty0, tx1, ty1, wx, wy;
+		palette_tab_rect(tab, w, h, &tx0, &ty0, &tx1, &ty1);
+		logical_to_win((tx0 + tx1) / 2, (ty0 + ty1) / 2, &wx, &wy);
+		int want = (tab == 0) ? PAL_TAB0 : PAL_TAB1, got = palette_pick(wx, wy, w, h);
+		checks++;
+		if (got != want) {
+			fprintf(stderr, "  FAIL tab %d -> px %d,%d -> got %d (want %d)\n", tab, wx, wy, got, want);
+			fails++;
+		}
+	}
+
+	/* Palette-source dropdown: the button, then every row of the open list. */
+	int sx0, sy0, sx1, sy1, wx, wy;
+	dropdown_t dd = {0, 0};
+	palette_src_rect(w, h, &sx0, &sy0, &sx1, &sy1);
+	logical_to_win((sx0 + sx1) / 2, (sy0 + sy1) / 2, &wx, &wy);
+	int got = dropdown_pick(&dd, wx, wy, g_zone_count, sx0, sy0, sx1, sy1, h, NULL);
+	checks++;
+	if (got != DD_BUTTON) {
+		fprintf(stderr, "  FAIL dropdown button -> px %d,%d -> got %d (want %d)\n", wx, wy, got, DD_BUTTON);
+		fails++;
+	}
+
+	dd.open = 1;
+	for (size_t s = 0; s < sizeof scroll_cases / sizeof scroll_cases[0]; s++) {
+		dd.scroll = scroll_cases[s];
+		int px0, py0, px1, py1;
+		dropdown_popup_rect(g_zone_count, sx1, sy1, h, &px0, &py0, &px1, &py1);
+		int rows = dropdown_rows_visible(g_zone_count, sy1, h);
+		for (int r = 0; r < rows; r++) {
+			int idx = dd.scroll + r;
+			if (idx >= g_zone_count) {
+				break;
+			}
+			logical_to_win((px0 + px1) / 2, py0 + 1 + r * DD_ROWH + DD_ROWH / 2, &wx, &wy);
+			got = dropdown_pick(&dd, wx, wy, g_zone_count, sx0, sy0, sx1, sy1, h, NULL);
+			checks++;
+			if (got != idx) {
+				fprintf(
+				    stderr, "  FAIL dropdown row %d (scroll %d) -> px %d,%d -> got %d\n", r, dd.scroll, wx, wy, got);
+				fails++;
+			}
+		}
+	}
+	dd.open = 0;
+
+	/* A point out on the map belongs to no widget. */
+	logical_to_win(w / 4, h / 2, &wx, &wy);
+	checks++;
+	if ((got = palette_pick(wx, wy, w, h)) != PAL_OUTSIDE) {
+		fprintf(stderr, "  FAIL map point -> palette_pick got %d (want %d)\n", got, PAL_OUTSIDE);
+		fails++;
+	}
+	checks++;
+	if ((got = dropdown_pick(&dd, wx, wy, g_zone_count, sx0, sy0, sx1, sy1, h, NULL)) != DD_NONE) {
+		fprintf(stderr, "  FAIL map point -> dropdown_pick got %d (want %d)\n", got, DD_NONE);
+		fails++;
+	}
+
+	g_pal_tab = saved_tab;
+	g_pal_scroll[0] = saved_scroll[0];
+	g_pal_scroll[1] = saved_scroll[1];
+
+	fprintf(stderr, "zoneedit: selftest widgets: %d/%d hit tests ok (%d floor + %d object brushes, %d zones)\n",
+	    checks - fails, checks, g_pal_count[LAYER_FLOOR], g_pal_count[LAYER_OBJECT], g_zone_count);
+	return fails;
+}
+
 /* Overlay bars: a title strip up top and a status/help strip along the bottom.
  * This is the first on-screen text (real client fonts via render_create_font),
  * the foundation the tile palette + quest forms will build on. */
@@ -2303,11 +2428,6 @@ int main(int argc, char *argv[])
 	}
 	fprintf(stderr, "zoneedit: camera at %.0f,%.0f, view %dx%d\n", camx, camy, w, h);
 
-	if (selftest) {
-		int fails = selftest_pick(camx, camy, w, h);
-		sdl_exit();
-		return fails ? 1 : 0;
-	}
 
 	/* Brushes come from the loaded map by default; --palette-from borrows another
 	 * zone's, which is what makes a freshly created area paintable at all. */
@@ -2322,6 +2442,16 @@ int main(int argc, char *argv[])
 
 	dropdown_t src_dd = {0, 0}; /* the palette-source selector */
 	int src_hover = -1;
+
+	/* Self-tests run here, after the palette exists, so the widget checks have
+	 * real brushes to walk. Pair with --palette-from for full cell coverage:
+	 * a fresh area only has one brush to test against. */
+	if (selftest) {
+		int fails = selftest_pick(camx, camy, w, h) + selftest_widgets(w, h);
+		fprintf(stderr, "zoneedit: selftest %s\n", fails ? "FAILED" : "PASSED");
+		sdl_exit();
+		return fails ? 1 : 0;
+	}
 
 	/* Start on whatever the camera is sitting on. */
 	brush_t brush = {g_map.gsprite[cellof((int)camx, (int)camy)], 0, LAYER_FLOOR};
